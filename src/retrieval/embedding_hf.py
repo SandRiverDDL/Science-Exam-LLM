@@ -56,6 +56,8 @@ class HFTextEmbedding:
         self.dtype = dtype
 
     def _embed_batch(self, texts: List[str]) -> torch.Tensor:
+        if not texts:
+            raise ValueError("texts list is empty")
         with torch.inference_mode():
             enc = self.tokenizer(
                 texts,

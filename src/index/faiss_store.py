@@ -54,7 +54,7 @@ class FaissIndex:
     def search(self, queries: List[List[float]], top_k: int):
         mat = np.array(queries, dtype=np.float32)
         D, I = self.index.search(mat, top_k)
-        return I, D
+        return D, I
 
     def save(self):
         os.makedirs(os.path.dirname(self.save_path), exist_ok=True)
