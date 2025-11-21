@@ -1,0 +1,10 @@
+{
+    // 确保 files.exclude 中没有排除 output 文件夹
+    
+    "search.exclude": {
+        "**/output": true,        // 忽略 output 文件夹及其所有内容
+        "**/*.bin": true,        // 忽略所有 .bin 文件
+        "**/.cache": true,         // 忽略 .cache 文件夹
+        "**/.data": true,         // 忽略 .data 文件夹
+    }
+}
