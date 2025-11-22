@@ -219,11 +219,15 @@ final_ids = title_ids + entity_ids + chunk_ids  # or if not using ids reuse deco
 **MMR（去重）**
 
 * 选取 topN 时用 MMR（λ=0.6~0.8）
+λ（relevance vs diversity 权衡）: 0.6 ~ 0.8（越偏 1 越重相关性）
 
+reranker topN 输入：N=80~200
+
+最终选给 LLM 的 chunk 数 K_final：3~8（通常 3~5 最常用）
 **Paragraph Boosting**
 
 * 如果多个 chunk 来自同一 paragraph/source, apply small bonus: `score += 0.05 * count_same_paragraph`
-
+beta（段落增强系数）：0.05 ~ 0.15（越大越激进）
 ---
 
 ## 8) Rerank（cross-encoder）
@@ -424,3 +428,41 @@ def calculate_overlap_score(query_entities, doc_entities_list, top_k=5):
     
     return overlap_count # 或者乘以一个系数 alpha
 ```
+| 特征名                   | 来源        |
+| --------------------- | --------- |
+| bm25_score            | Stage 1   |
+| bge_score             | Stage 1   |
+| jina_emb_score        | Stage 2   |
+| jina_rerank_score     | Stage 3   |
+| chunk_length          | meta      |
+| chunk_position        | meta      |
+| entity_overlap        | NLP       |
+| question_chunk_cosine | embedding |
+
+Label 从哪来？你只有 QA 数据？这样做：
+你有：
+
+60k QA pair
+
+17GB 文本
+
+你生成 label 的方式如下：
+方式 1：自动弱监督（强烈推荐）
+
+对每条 QA，取 ground truth answer，检索所有 chunk，视情况打标签：
+
+情况	Label
+chunk 含完全答案片段	1
+chunk 含部分答案（句子级别）	1（weak positive）
+chunk 无关	0
+如何自动判断？
+
+用 sentence-BERT 算 similarity
+
+用 keyword overlap
+
+用 LLM 做两句对齐判定（cost 低）
+
+这是大部分 RAG 系统使用的“自动标签生成”技术。
+
+你不需要人工标注。

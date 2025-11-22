@@ -101,8 +101,9 @@ preprocessing:
   title_max_tokens: 16           # 标题最大token数
   use_stopword_removal: true     # 是否去除停用词
   max_words_after_stopword: 8    # 去停用词后的最大单词数
-  parquet_chunk_size_mb: 256     # 每个Parquet文件的大小（MB）
+  parquet_chunk_size_mb: 512    # 每个Parquet文件的大小（MB），默认1GB
   output_dir: "data/processed/parquet"  # 输出目录
+  resume: true                   # 断点续跑（开启后自动跳过已处理文档）
 
 # 父文档索引 (Parent Document) Chunking配置
 chunking:
