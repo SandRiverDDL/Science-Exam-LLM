@@ -6,11 +6,11 @@ data:
     chunk_size_tokens: 256 #256
     chunk_overlap_tokens: 64 #50
 pipeline:
-  batch_size: 2048           # 构建索引时的嵌入批量大小（提升至 8192 以充分利用 GPU）
+  batch_size: 1024           # 构建索引时的嵌入批量大小（提升至 8192 以充分利用 GPU）
   log_embedding_stats: false # 关闭嵌入统计日志，减少 I/O 开销
   progress_interval_sec: 3   # 进度打印间隔（秒），降低至 3 秒获得更及时反馈
-  embed_from_tokens: true    # 直接使用分块生成的 token ids 进行嵌入
-  embed_tokens_model: bge_small  # 与直通 ids 对齐的嵌入模型（bge_small|bge|gte|qwen3）
+  # embed_from_tokens: true    # 直接使用分块生成的 token ids 进行嵌入
+  # embed_tokens_model: bge_small  # 与直通 ids 对齐的嵌入模型（bge_small|bge|gte|qwen3）
   periodic_save:
     sec: 60                  # 每隔 1 分钟保存一次索引（用于测试断点续跑）
     chunks: 0                # 禁用按 chunk 数量保存
@@ -20,7 +20,7 @@ pipeline:
     skip_duplicate_check: true  # 跳过重复检查（仅信任 checkpoint，性能更好）
 
 # Embedding（现阶段仅一路：Jina v4 GGUF）
-embedding:
+embedding_jina:
   backend: "llama_cpp_gguf"
   repo_id: "jinaai/jina-embeddings-v4-text-retrieval-GGUF"
   filename: "jina-embeddings-v4-text-retrieval-F16.gguf"
@@ -48,8 +48,9 @@ indices:
   bge_small:
     enabled: true
     index_path: "data/faiss/bge_small_fp16_ip.faiss"
-    meta_path: "data/faiss/bge_small_meta.json"
-    meta_jsonl_path: "data/faiss/bge_small_meta.jsonl"   # 流式写出 meta+text 的 JSONL 文件
+    chunk_id_map_path: "data/faiss/bge_small_chunk_id_map.json"  # faiss_id -> chunk_id映射
+    meta_path: "data/faiss/bge_small_meta.json"  # 已废弃，metadata从chunks Parquet读取
+    meta_jsonl_path: "data/faiss/bge_small_meta.jsonl"  # 已废弃
   qwen3:
     enabled: false
     index_path: "data/faiss/qwen3_fp16_ip.faiss"
