@@ -38,7 +38,8 @@ class Qwen3EmbeddingModel(BaseEmbeddingModel):
         # 加载tokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(
             model_id,
-            trust_remote_code=trust_remote_code
+            trust_remote_code=trust_remote_code,
+            use_fast=True,
         )
         
         # 加载模型

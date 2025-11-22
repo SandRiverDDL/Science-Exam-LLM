@@ -156,6 +156,20 @@ class EmbeddingBuilderV2:
         print(f"[save] Chunk ID映射已保存: {mapping_path}")
         print(f"  映射数量: {len(self.chunk_id_list):,}")
     
+    def _format_time(self, seconds: float) -> str:
+        """格式化时间显示
+        
+        Args:
+            seconds: 秒数
+        
+        Returns:
+            格式化后的时间字符串 (HH:MM:SS)
+        """
+        hours = int(seconds // 3600)
+        minutes = int((seconds % 3600) // 60)
+        secs = int(seconds % 60)
+        return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+    
     def build(self):
         """构建索引主流程"""
         print("=" * 80)
@@ -187,82 +201,60 @@ class EmbeddingBuilderV2:
         total_vectors = 0
         start_time = time.time()
         last_save_time = start_time
+        last_progress_time = start_time
         
         batch_texts = []
         batch_chunk_ids = []
         
-        print(f"\n[embed] 开始嵌入...")
+        print(f"\n[prepare] 提取和拼接文本（向量化）...")
         
-        for idx, row in df_chunks.iterrows():
-            chunk_id = row['chunk_id']
-            doc_id = row['doc_id']
-            title = row.get('title', '')
-            child_start = row['child_start']
-            child_end = row['child_end']
-            
-            # 从documents中提取文本
-            if doc_id not in self.doc_texts:
-                print(f"\n[warn] 未找到文档: {doc_id}")
-                continue
-            
-            doc_text = self.doc_texts[doc_id]
-            child_text = doc_text[child_start:child_end]
-            
-            # 拼接标题和文本
-            if title:
-                full_text = f"{title}\n\n{child_text}"
-            else:
-                full_text = child_text
-            
-            batch_texts.append(full_text)
-            batch_chunk_ids.append(chunk_id)
-            
-            # 当批次满了，进行embedding
-            if len(batch_texts) >= self.batch_size:
-                # 生成embeddings
-                embeddings = self.embedding_model.encode(
-                    batch_texts,
-                    batch_size=self.batch_size,
-                    normalize=True,
-                    show_progress=False
-                )
-                
-                # 写入FAISS
-                self.index.add(embeddings.astype(np.float32))
-                
-                # 记录chunk_id映射
-                self.chunk_id_list.extend(batch_chunk_ids)
-                self.processed_chunks.update(batch_chunk_ids)
-                
-                total_vectors += len(embeddings)
-                total_processed += len(batch_chunk_ids)
-                
-                # 清空批次
-                batch_texts = []
-                batch_chunk_ids = []
-                
-                # 进度显示
-                elapsed = time.time() - start_time
-                speed = total_vectors / elapsed if elapsed > 0 else 0
-                current_time = time.strftime("%H:%M:%S")
-                print(f"\r  [{current_time}] 已处理 {total_processed:,}/{total_chunks:,} chunks | "
-                      f"已嵌入 {total_vectors:,} 向量 | 速度 {speed:.0f} vec/s", end='', flush=True)
-                
-                # 定期保存（每5分钟）
-                if time.time() - last_save_time > 300:
-                    print(f"\n[{current_time}] [save] 定期保存索引...")
-                    self._save_index()
-                    self._save_chunk_id_mapping()
-                    self._save_checkpoint()
-                    last_save_time = time.time()
-                    
-                    # 强制垃圾回收
-                    import gc
-                    gc.collect()
-                    torch.cuda.empty_cache() if torch.cuda.is_available() else None
+        # Step 1: 提取批量数据（使用numpy避免逐条迭代）
+        doc_ids = df_chunks['doc_id'].values
+        titles = df_chunks['title'].fillna('').values
+        child_starts = df_chunks['child_start'].values
+        child_ends = df_chunks['child_end'].values
+        chunk_ids = df_chunks['chunk_id'].values
         
-        # 处理剩余的批次
-        if batch_texts:
+        # Step 2: 检查正吧性
+        missing_docs = set(doc_ids) - set(self.doc_texts.keys())
+        if missing_docs:
+            print(f"[warn] 未找到 {len(missing_docs)} 个文档，将跳过")
+        
+        # 仅保留有效文档
+        valid_mask = np.array([doc_id in self.doc_texts for doc_id in doc_ids])
+        valid_indices = np.where(valid_mask)[0]
+        
+        doc_ids = doc_ids[valid_indices]
+        titles = titles[valid_indices]
+        child_starts = child_starts[valid_indices]
+        child_ends = child_ends[valid_indices]
+        chunk_ids = chunk_ids[valid_indices]
+        
+        print(f"  有效chunks: {len(chunk_ids):,}")
+        
+        # Step 3: 使用列表推导式批量提取文本（避免逐条dict查询）
+        child_texts = [self.doc_texts[doc_id][start:end] 
+                      for doc_id, start, end in zip(doc_ids, child_starts, child_ends)]
+        
+        # Step 4: 拼接标题和正文
+        full_texts = [f"{title}\n\n{text}" if title else text
+                     for title, text in zip(titles, child_texts)]
+        
+        # Step 5: 批量embedding
+        print(f"\n[embed] 开始批量嵌入...\n")
+        total_processed = len(self.processed_chunks)
+        total_vectors = 0
+        start_time = time.time()
+        last_save_time = start_time
+        last_progress_time = start_time
+        
+        # 批量处理（使用range不需要.iterrows()）
+        for batch_start in range(0, len(full_texts), self.batch_size):
+            batch_end = min(batch_start + self.batch_size, len(full_texts))
+            batch_texts = full_texts[batch_start:batch_end]
+            batch_chunk_ids = chunk_ids[batch_start:batch_end]
+            
+            # 批量encoding
             embeddings = self.embedding_model.encode(
                 batch_texts,
                 batch_size=self.batch_size,
@@ -270,11 +262,55 @@ class EmbeddingBuilderV2:
                 show_progress=False
             )
             
+            # 写入FAISS
             self.index.add(embeddings.astype(np.float32))
-            self.chunk_id_list.extend(batch_chunk_ids)
+            
+            # 记录chunk_id映射
+            self.chunk_id_list.extend(batch_chunk_ids.tolist())
             self.processed_chunks.update(batch_chunk_ids)
+            
             total_vectors += len(embeddings)
             total_processed += len(batch_chunk_ids)
+            
+            # 进度显示（每秒更新一次）
+            current_time = time.time()
+            if current_time - last_progress_time >= 1.0:
+                elapsed = current_time - start_time
+                speed = total_vectors / elapsed if elapsed > 0 else 0
+                
+                # 计算预计剩余时间
+                if speed > 0 and total_processed < total_chunks:
+                    remaining_vectors = (total_chunks - total_processed)
+                    remaining_time = remaining_vectors / speed
+                    remaining_str = self._format_time(remaining_time)
+                else:
+                    remaining_str = "计算中"
+                
+                elapsed_str = self._format_time(elapsed)
+                progress_pct = (total_processed / total_chunks * 100) if total_chunks > 0 else 0
+                
+                time_str = time.strftime("%H:%M:%S")
+                print(f"\r  [{time_str}] 进度: {progress_pct:5.1f}% ({total_processed:,}/{total_chunks:,}) | "
+                      f"速度: {speed:6.0f} chunks/s | "
+                      f"已耗时: {elapsed_str} | "
+                      f"预计剩余: {remaining_str}", end='', flush=True)
+                
+                last_progress_time = current_time
+                
+            
+            # 定期保存（每5分钟）
+            if current_time - last_save_time > 300:
+                print(f"\n[{time.strftime('%H:%M:%S')}] [save] 定期保存索引...")
+                self._save_index()
+                self._save_chunk_id_mapping()
+                self._save_checkpoint()
+                last_save_time = current_time
+                print(f"[{time.strftime('%H:%M:%S')}] [save] 保存完成")
+                
+                # 强制垃圾回收
+                import gc
+                gc.collect()
+                torch.cuda.empty_cache() if torch.cuda.is_available() else None
         
         # 最终保存
         print(f"\n\n[save] 最终保存...")
@@ -308,23 +344,18 @@ def main(model_name: str = "qwen3"):
     chunks_path = "data/processed/chunks.parquet"
     documents_path = "data/processed/documents_cleaned.parquet"
     
-    # 根据模型名称获取配置
-    model_config_key = f"embedding_{model_name}"
-    model_config = cfg.get(model_config_key, {})
+    # 根据模型名称获取配置（从 embedding.{model_name} 读取）
+    model_config = cfg.get("embedding", model_name, default={})
     
     if not model_config:
-        raise ValueError(f"未找到模型配置: {model_config_key}")
+        raise ValueError(f"未找到模型配置: embedding.{model_name}")
     
-    # 索引路径
-    index_config_key = f"indices.{model_name}"
-    index_path = cfg.get("indices", model_name, "index_path", default=f"data/faiss/{model_name}_flat.index")
-    
-    # 初始化embedding模型
+    # 初始化embedding模型参数
     model_id = model_config.get("model_id", "Alibaba-NLP/gte-Qwen2-1.5B-instruct")
-    device = model_config.get("device", "cuda")
+    device = model_config.get("device") or "cuda"  # None 时默认为 cuda
     max_length = model_config.get("max_length", 512)
     dtype = model_config.get("dtype", "float16")
-
+    index_path = model_config.get("index_path", f"data/faiss/{model_name}_fp16_ip.faiss")
     batch_size = cfg.get("pipeline", "batch_size", default=1024)
     
     print(f"[config] 使用模型: {model_name}")
@@ -332,6 +363,8 @@ def main(model_name: str = "qwen3"):
     print(f"  device: {device}")
     print(f"  max_length: {max_length}")
     print(f"  dtype: {dtype}")
+    print(f"  index_path: {index_path}")
+    print(f"  batch_size: {batch_size}")
     
     embedding_model = Qwen3EmbeddingModel(
         model_id=model_id,
