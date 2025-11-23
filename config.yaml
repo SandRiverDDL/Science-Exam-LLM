@@ -8,7 +8,7 @@ data:
     chunk_size_tokens: 256 #256
     chunk_overlap_tokens: 64 #50
 pipeline:
-  batch_size: 512           # 构建索引时的嵌入批量大小（提升至 8192 以充分利用 GPU）
+  batch_size: 64          # 批量大小（每次encode处理的chunk数）
   log_embedding_stats: false # 关闭嵌入统计日志，减少 I/O 开销
   progress_interval_sec: 3   # 进度打印间隔（秒），降低至 3 秒获得更及时反馈
   # embed_from_tokens: true    # 直接使用分块生成的 token ids 进行嵌入
@@ -77,7 +77,7 @@ embedding:
 
   jasper:
     model_id: "infgrad/Jasper-Token-Compression-600M"
-    max_length: 512
+    max_length: 168
     device: null   # 自动选择 cuda/cpu
     dtype: float16 # 在 CUDA 上用 FP16 提升吞吐
     index_path: "data/faiss/jasper_fp16_ip.faiss"

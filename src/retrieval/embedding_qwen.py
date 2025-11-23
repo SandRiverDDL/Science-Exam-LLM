@@ -74,7 +74,16 @@ class Qwen3EmbeddingModel(BaseEmbeddingModel):
         self.model.eval()
         
         # 获取向量维度
-        self._dim = self.model.config.hidden_size
+        try:
+            self._dim = self.model.config.hidden_size
+            if self._dim is None or self._dim == 0:
+                raise ValueError(f"hidden_size 无效: {self._dim}")
+        except Exception as e:
+            print(f"[error] 获取 hidden_size 失败: {e}，尝试编码样本获取维度...")
+            with torch.no_grad():
+                test_input = self.tokenizer(["test"], return_tensors="pt").to(device)
+                test_output = self.model(**test_input)
+                self._dim = test_output.last_hidden_state.shape[-1]
         
         print(f"[Qwen3] 模型加载完成")
         print(f"  向量维度: {self._dim}")

@@ -47,8 +47,9 @@ class JasperEmbeddingModel(BaseEmbeddingModel):
             "trust_remote_code": trust_remote_code
         }
         
-        # 如果启用flash-attn，添加attn_implementation参数
-        if use_flash_attn:
+        # flash-attn只支持float16/bfloat16，需要提前指定dtype
+        if use_flash_attn and dtype == "float16":
+            model_kwargs["torch_dtype"] = torch.float16
             model_kwargs["attn_implementation"] = "flash_attention_2"
         
         self.model = SentenceTransformer(
@@ -58,8 +59,8 @@ class JasperEmbeddingModel(BaseEmbeddingModel):
             device=device
         )
         
-        # 设置数据类型
-        if dtype == "float16" and device == "cuda":
+        # 如果没有在加载时设置dtype，事后转换
+        if dtype == "float16" and device == "cuda" and not use_flash_attn:
             self.model = self.model.half()
         
         # 统计信息
@@ -69,7 +70,17 @@ class JasperEmbeddingModel(BaseEmbeddingModel):
             print(f"  启用 encode 性能监控")
         
         # 获取向量维度
-        self._dim = self.model.get_sentence_embedding_dimension()
+        try:
+            self._dim = self.model.get_sentence_embedding_dimension()
+            if self._dim is None:
+                # 如果get_sentence_embedding_dimension返回None，尝试编码一个样本获取维度
+                print(f"[warn] get_sentence_embedding_dimension() 返回 None，尝试编码样本获取维度...")
+                test_embedding = self.model.encode(["test"], convert_to_numpy=True)
+                self._dim = test_embedding.shape[1]
+        except Exception as e:
+            print(f"[error] 获取向量维度失败: {e}，尝试编码样本获取维度...")
+            test_embedding = self.model.encode(["test"], convert_to_numpy=True)
+            self._dim = test_embedding.shape[1]
         
         print(f"[Jasper] 模型加载完成")
         print(f"  向量维度: {self._dim}")

@@ -1,17 +1,32 @@
 import torch
-import torch.nn as nn
-from torch.profiler import profile, record_function, ProfilerActivity
 from sentence_transformers import SentenceTransformer
 
-model = SentenceTransformer(
-    "infgrad/Jasper-Token-Compression-600M",
-    model_kwargs={"trust_remote_code": True},
-    trust_remote_code=True
-)
+if __name__ == "__main__":
+    model_name_or_path = "infgrad/Jasper-Token-Compression-600M"
+    model = SentenceTransformer(
+        model_name_or_path,
+        model_kwargs={
+            "torch_dtype": torch.bfloat16,
+            "attn_implementation": "sdpa",  # We support flash_attention_2; sdpa; eager
+            "trust_remote_code": True
+        },
+        trust_remote_code=True,
+        tokenizer_kwargs={"padding_side": "left"},
+        device="cpu",
+    )
 
-text = ["This is a test sentence."] * 64
+    queries = [
+        "What is photosynthesis?",
+        "Who invented the telephone?",
+    ]
+    documents = [
+        "Photosynthesis is the process by which green plants use sunlight, carbon dioxide, and water to produce glucose and oxygen",
+        "Alexander Graham Bell is credited with inventing the first practical telephone in 1876, receiving US patent number 174,465 for his device."
+    ]
+    # The smaller the compression_ratio parameter, the faster the speed, but the quality will correspondingly decrease.
+    # Based on our parameter settings during training and test results, we recommend a range between 0.3-0.8.
+    query_embeddings = model.encode(queries, prompt_name="query", normalize_embeddings=True, compression_ratio=0.3333)
+    document_embeddings = model.encode(documents, normalize_embeddings=True, compression_ratio=0.3333)
 
-with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
-    model.encode(text, compression_ratio=0.3)
-
-print(prof.key_averages().table(sort_by="cuda_time_total"))
+    similarity = model.similarity(query_embeddings, document_embeddings)
+    print(similarity)

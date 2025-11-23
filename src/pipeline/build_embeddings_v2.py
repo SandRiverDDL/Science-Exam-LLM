@@ -153,30 +153,30 @@ class EmbeddingBuilderV2:
         print(f"[save] 索引已保存: {self.index_path}")
         print(f"  大小: {raw_size:.2f} MB")
         
-        # 如果需要压缩，使用zstd（比LZ4更好的压缩率）
-        if compress:
-            try:
-                import zstandard as zstd
-                compressed_path = self.index_path + ".zst"
-                
-                with open(self.index_path, 'rb') as f_in:
-                    data = f_in.read()
-                    compressed_data = zstd.compress(data, level=10)
-                
-                with open(compressed_path, 'wb') as f_out:
-                    f_out.write(compressed_data)
-                
-                compressed_size = os.path.getsize(compressed_path) / (1024**2)
-                ratio = (1 - compressed_size / raw_size) * 100 if raw_size > 0 else 0
-                
-                print(f"  压缩后: {compressed_size:.2f} MB (zstd)")
-                print(f"  压缩率: {ratio:.1f}%")
-                
-                # 删除原始文件，只保留压缩版本
-                os.remove(self.index_path)
-                print(f"[save] 原始索引已删除，仅保留压缩版本")
-            except ImportError:
-                print(f"[warn] zstandard库未安装，跳过压缩")
+        # # 或者不进行压缩，仅保存原始文件
+        # if compress:
+        #     try:
+        #         import zstandard as zstd
+        #         compressed_path = self.index_path + ".zst"
+        #         
+        #         with open(self.index_path, 'rb') as f_in:
+        #             data = f_in.read()
+        #             compressed_data = zstd.compress(data, level=10)
+        #         
+        #         with open(compressed_path, 'wb') as f_out:
+        #             f_out.write(compressed_data)
+        #         
+        #         compressed_size = os.path.getsize(compressed_path) / (1024**2)
+        #         ratio = (1 - compressed_size / raw_size) * 100 if raw_size > 0 else 0
+        #         
+        #         print(f"  压缩后: {compressed_size:.2f} MB (zstd)")
+        #         print(f"  压缩率: {ratio:.1f}%")
+        #         
+        #         # 删除原始文件，只保留压缩版本
+        #         os.remove(self.index_path)
+        #         print(f"[save] 原始索引已删除，仅保留压缩版本")
+        #     except ImportError:
+        #         print(f"[warn] zstandard库未安装，跳过压缩")
     
     def _save_chunk_id_mapping(self):
         """保存chunk_id映射（faiss_id -> chunk_id）"""
@@ -301,13 +301,23 @@ class EmbeddingBuilderV2:
                 batch_texts = full_texts[i:i + self.batch_size]
                 batch_chunk_ids = chunk_ids[i:i + self.batch_size]
                 
+                if len(batch_texts) == 0:
+                    continue
+                
                 # 批量encoding
+                # 注意：不在这里传入batch_size，让SentenceTransformer自己处理
+                # 或者传入一个很大的值让它一次处理所有
                 embeddings = self.embedding_model.encode(
                     batch_texts,
-                    batch_size=self.batch_size,
+                    batch_size=len(batch_texts),  # 一次处理所有batch_texts
                     normalize=True,
                     show_progress=False
                 )
+                
+                # 检查embedding是否有效
+                if embeddings is None or len(embeddings) == 0:
+                    print(f"[warn] embedding返回None或为empty, batch_size={len(batch_texts)}")
+                    continue
                 
                 # 写入FAISS
                 self.index.add(embeddings.astype(np.float32))
