@@ -3,7 +3,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 import os
 
 model_id = "ISTA-DASLab/Qwen3-8B-Instruct-FPQuant-QAT-MXFP4-TEMP"
-os.environ['huggingface_token'] = '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'
+
 # 1. 定义 4-bit 量化配置
 # 即使模型已量化，通常也需要此配置来加载 BitsAndBytes 格式或兼容设置
 bnb_config = BitsAndBytesConfig(
