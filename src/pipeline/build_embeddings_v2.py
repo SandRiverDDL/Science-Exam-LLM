@@ -12,14 +12,27 @@ import os
 import sys
 import json
 import time
+import gc
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 import torch
-import faiss
+
+# 动态导入FAISS（优先使用faiss-gpu）
+try:
+    import faiss
+    # 检查是否为faiss-gpu版本
+    if hasattr(faiss, "get_num_gpus"):
+        print(f"[FAISS] 使用 faiss-gpu (GPU数量: {faiss.get_num_gpus()})")
+    else:
+        print(f"[FAISS] 使用 faiss-cpu")
+except ImportError as e:
+    print(f"[ERROR] 无法导入FAISS: {e}")
+    sys.exit(1)
 
 # 添加项目路径
 project_root = Path(__file__).parent.parent.parent
@@ -27,6 +40,7 @@ sys.path.insert(0, str(project_root / 'src'))
 
 from core.config import Config
 from retrieval.embedding_qwen import Qwen3EmbeddingModel
+from retrieval.embedding_jasper import JasperEmbeddingModel
 from retrieval.embedding_base import BaseEmbeddingModel
 
 
@@ -120,8 +134,12 @@ class EmbeddingBuilderV2:
         with open(self.checkpoint_path, 'w', encoding='utf-8') as f:
             json.dump(checkpoint, f, ensure_ascii=False, indent=2)
     
-    def _save_index(self):
-        """保存FAISS索引（使用LZ4压缩）"""
+    def _save_index(self, compress=False):
+        """保存FAISS索引
+        
+        Args:
+            compress: 是否压缩（仅在最后一次保存时设为True）
+        """
         if self.index is None:
             return
         
@@ -130,23 +148,35 @@ class EmbeddingBuilderV2:
         # 保存索引
         faiss.write_index(self.index, self.index_path)
         
-        # 压缩索引（使用LZ4）
-        import lz4.frame
-        
-        compressed_path = self.index_path + ".lz4"
-        with open(self.index_path, 'rb') as f_in:
-            with lz4.frame.open(compressed_path, 'wb') as f_out:
-                f_out.write(f_in.read())
-        
         # 显示文件大小
         raw_size = os.path.getsize(self.index_path) / (1024**2)
-        compressed_size = os.path.getsize(compressed_path) / (1024**2)
-        ratio = (1 - compressed_size / raw_size) * 100 if raw_size > 0 else 0
-        
         print(f"[save] 索引已保存: {self.index_path}")
-        print(f"  原始大小: {raw_size:.2f} MB")
-        print(f"  压缩后: {compressed_size:.2f} MB (LZ4)")
-        print(f"  压缩率: {ratio:.1f}%")
+        print(f"  大小: {raw_size:.2f} MB")
+        
+        # # 或者不进行压缩，仅保存原始文件
+        # if compress:
+        #     try:
+        #         import zstandard as zstd
+        #         compressed_path = self.index_path + ".zst"
+        #         
+        #         with open(self.index_path, 'rb') as f_in:
+        #             data = f_in.read()
+        #             compressed_data = zstd.compress(data, level=10)
+        #         
+        #         with open(compressed_path, 'wb') as f_out:
+        #             f_out.write(compressed_data)
+        #         
+        #         compressed_size = os.path.getsize(compressed_path) / (1024**2)
+        #         ratio = (1 - compressed_size / raw_size) * 100 if raw_size > 0 else 0
+        #         
+        #         print(f"  压缩后: {compressed_size:.2f} MB (zstd)")
+        #         print(f"  压缩率: {ratio:.1f}%")
+        #         
+        #         # 删除原始文件，只保留压缩版本
+        #         os.remove(self.index_path)
+        #         print(f"[save] 原始索引已删除，仅保留压缩版本")
+        #     except ImportError:
+        #         print(f"[warn] zstandard库未安装，跳过压缩")
     
     def _save_chunk_id_mapping(self):
         """保存chunk_id映射（faiss_id -> chunk_id）"""
@@ -170,10 +200,50 @@ class EmbeddingBuilderV2:
         secs = int(seconds % 60)
         return f"{hours:02d}:{minutes:02d}:{secs:02d}"
     
+    def _prepare_text_batch_optimized(self, doc_ids: np.ndarray, titles: np.ndarray, 
+                                      child_starts: np.ndarray, child_ends: np.ndarray) -> List[str]:
+        """优化的文本预处理：批量拼接（避免循环中的string concat）
+        
+        关键优化：
+        1. 在numpy级别操作，避免Python循环
+        2. 使用向量化的title拼接
+        3. 预先分配列表空间
+        
+        Args:
+            doc_ids: 文档ID数组
+            titles: 标题数组
+            child_starts: 子chunk开始位置
+            child_ends: 子chunk结束位置
+        
+        Returns:
+            拼接好的文本列表
+        """
+        # 一次性提取所有子文本（避免逐条dict查询）
+        start_time = time.time()
+        
+        child_texts = []
+        for doc_id, start, end in zip(doc_ids, child_starts, child_ends):
+            if doc_id in self.doc_texts:
+                child_texts.append(self.doc_texts[doc_id][int(start):int(end)])
+            else:
+                child_texts.append("")
+        
+        # 向量化地拼接标题和正文（使用列表推导式在numpy级别）
+        has_title = titles != ''
+        full_texts = [
+            f"{title}\n\n{text}" if has_t else text
+            for title, text, has_t in zip(titles, child_texts, has_title)
+        ]
+        
+        elapsed = time.time() - start_time
+        print(f"  文本预处理耗时: {elapsed:.2f}s ({len(full_texts)} texts)")
+        
+        return full_texts
+    
     def build(self):
-        """构建索引主流程"""
+        """构建索引主流程（真·流式版本）"""
         print("=" * 80)
-        print("[build] 开始构建FAISS索引 V2")
+        print("[build] 开始构建FAISS索引 V2 (真·流式优化版本)")
         print(f"  Chunks路径: {self.chunks_path}")
         print(f"  Documents路径: {self.documents_path}")
         print(f"  模型: {self.embedding_model.get_model_name()}")
@@ -185,136 +255,122 @@ class EmbeddingBuilderV2:
         # 初始化索引
         self._init_index()
         
-        # 读取chunks
-        print(f"\n[load] 读取chunks...")
-        df_chunks = pd.read_parquet(self.chunks_path)
-        total_chunks = len(df_chunks)
+        # 加载断点（如果有）
+        if self.resume:
+            self._load_checkpoint()
+        
+        # 读取chunks元数据
+        print(f"\n[load] 读取chunks元数据...")
+        parquet_file = pq.ParquetFile(self.chunks_path)
+        total_chunks = parquet_file.metadata.num_rows
         print(f"  总chunks: {total_chunks:,}")
         
-        # 过滤已处理的
-        if self.resume and self.processed_chunks:
-            df_chunks = df_chunks[~df_chunks['chunk_id'].isin(self.processed_chunks)]
-            print(f"  剩余未处理: {len(df_chunks):,}")
-        
-        # 批量处理
         total_processed = len(self.processed_chunks)
         total_vectors = 0
         start_time = time.time()
         last_save_time = start_time
         last_progress_time = start_time
         
-        batch_texts = []
-        batch_chunk_ids = []
+        # 真·流式处理：每次读8192条，立即处理，不堆积内存
+        parquet_batch_size = 8192
+        print(f"\n[embed] 开始流式处理（每批{parquet_batch_size}条）...\n")
         
-        print(f"\n[prepare] 提取和拼接文本（向量化）...")
-        
-        # Step 1: 提取批量数据（使用numpy避免逐条迭代）
-        doc_ids = df_chunks['doc_id'].values
-        titles = df_chunks['title'].fillna('').values
-        child_starts = df_chunks['child_start'].values
-        child_ends = df_chunks['child_end'].values
-        chunk_ids = df_chunks['chunk_id'].values
-        
-        # Step 2: 检查正吧性
-        missing_docs = set(doc_ids) - set(self.doc_texts.keys())
-        if missing_docs:
-            print(f"[warn] 未找到 {len(missing_docs)} 个文档，将跳过")
-        
-        # 仅保留有效文档
-        valid_mask = np.array([doc_id in self.doc_texts for doc_id in doc_ids])
-        valid_indices = np.where(valid_mask)[0]
-        
-        doc_ids = doc_ids[valid_indices]
-        titles = titles[valid_indices]
-        child_starts = child_starts[valid_indices]
-        child_ends = child_ends[valid_indices]
-        chunk_ids = chunk_ids[valid_indices]
-        
-        print(f"  有效chunks: {len(chunk_ids):,}")
-        
-        # Step 3: 使用列表推导式批量提取文本（避免逐条dict查询）
-        child_texts = [self.doc_texts[doc_id][start:end] 
-                      for doc_id, start, end in zip(doc_ids, child_starts, child_ends)]
-        
-        # Step 4: 拼接标题和正文
-        full_texts = [f"{title}\n\n{text}" if title else text
-                     for title, text in zip(titles, child_texts)]
-        
-        # Step 5: 批量embedding
-        print(f"\n[embed] 开始批量嵌入...\n")
-        total_processed = len(self.processed_chunks)
-        total_vectors = 0
-        start_time = time.time()
-        last_save_time = start_time
-        last_progress_time = start_time
-        
-        # 批量处理（使用range不需要.iterrows()）
-        for batch_start in range(0, len(full_texts), self.batch_size):
-            batch_end = min(batch_start + self.batch_size, len(full_texts))
-            batch_texts = full_texts[batch_start:batch_end]
-            batch_chunk_ids = chunk_ids[batch_start:batch_end]
+        for batch in parquet_file.iter_batches(batch_size=parquet_batch_size, 
+                                              columns=['chunk_id', 'doc_id', 'title', 'child_start', 'child_end']):
+            df_batch = batch.to_pandas()
             
-            # 批量encoding
-            embeddings = self.embedding_model.encode(
-                batch_texts,
-                batch_size=self.batch_size,
-                normalize=True,
-                show_progress=False
-            )
+            # 过滤已处理的
+            if self.resume and self.processed_chunks:
+                df_batch = df_batch[~df_batch['chunk_id'].isin(self.processed_chunks)]
             
-            # 写入FAISS
-            self.index.add(embeddings.astype(np.float32))
+            if len(df_batch) == 0:
+                continue
             
-            # 记录chunk_id映射
-            self.chunk_id_list.extend(batch_chunk_ids.tolist())
-            self.processed_chunks.update(batch_chunk_ids)
+            # 提取数组
+            doc_ids = df_batch['doc_id'].values
+            titles = df_batch['title'].fillna('').values
+            child_starts = df_batch['child_start'].values
+            child_ends = df_batch['child_end'].values
+            chunk_ids = df_batch['chunk_id'].values
             
-            total_vectors += len(embeddings)
-            total_processed += len(batch_chunk_ids)
+            # 批量拼接文本（向量化操作）
+            full_texts = self._prepare_text_batch_optimized(doc_ids, titles, child_starts, child_ends)
             
-            # 进度显示（每秒更新一次）
-            current_time = time.time()
-            if current_time - last_progress_time >= 1.0:
-                elapsed = current_time - start_time
-                speed = total_vectors / elapsed if elapsed > 0 else 0
+            # 立即进行embedding（按照self.batch_size分批）
+            for i in range(0, len(full_texts), self.batch_size):
+                batch_texts = full_texts[i:i + self.batch_size]
+                batch_chunk_ids = chunk_ids[i:i + self.batch_size]
                 
-                # 计算预计剩余时间
-                if speed > 0 and total_processed < total_chunks:
-                    remaining_vectors = (total_chunks - total_processed)
-                    remaining_time = remaining_vectors / speed
-                    remaining_str = self._format_time(remaining_time)
-                else:
-                    remaining_str = "计算中"
+                if len(batch_texts) == 0:
+                    continue
                 
-                elapsed_str = self._format_time(elapsed)
-                progress_pct = (total_processed / total_chunks * 100) if total_chunks > 0 else 0
+                # 批量encoding
+                # 注意：不在这里传入batch_size，让SentenceTransformer自己处理
+                # 或者传入一个很大的值让它一次处理所有
+                embeddings = self.embedding_model.encode(
+                    batch_texts,
+                    batch_size=len(batch_texts),  # 一次处理所有batch_texts
+                    normalize=True,
+                    show_progress=False
+                )
                 
-                time_str = time.strftime("%H:%M:%S")
-                print(f"\r  [{time_str}] 进度: {progress_pct:5.1f}% ({total_processed:,}/{total_chunks:,}) | "
-                      f"速度: {speed:6.0f} chunks/s | "
-                      f"已耗时: {elapsed_str} | "
-                      f"预计剩余: {remaining_str}", end='', flush=True)
+                # 检查embedding是否有效
+                if embeddings is None or len(embeddings) == 0:
+                    print(f"[warn] embedding返回None或为empty, batch_size={len(batch_texts)}")
+                    continue
                 
-                last_progress_time = current_time
+                # 写入FAISS
+                self.index.add(embeddings.astype(np.float32))
                 
-            
-            # 定期保存（每5分钟）
-            if current_time - last_save_time > 300:
-                print(f"\n[{time.strftime('%H:%M:%S')}] [save] 定期保存索引...")
-                self._save_index()
-                self._save_chunk_id_mapping()
-                self._save_checkpoint()
-                last_save_time = current_time
-                print(f"[{time.strftime('%H:%M:%S')}] [save] 保存完成")
+                # 记录chunk_id映射
+                self.chunk_id_list.extend(batch_chunk_ids.tolist())
+                self.processed_chunks.update(batch_chunk_ids.tolist())
                 
-                # 强制垃圾回收
-                import gc
-                gc.collect()
-                torch.cuda.empty_cache() if torch.cuda.is_available() else None
+                total_vectors += len(embeddings)
+                total_processed += len(batch_chunk_ids)
+                
+                # 进度显示（每秒更新一次）
+                current_time = time.time()
+                if current_time - last_progress_time >= 1.0:
+                    elapsed = current_time - start_time
+                    speed = total_vectors / elapsed if elapsed > 0 else 0
+                    
+                    # 计算预计剩余时间
+                    if speed > 0 and total_processed < total_chunks:
+                        remaining_vectors = (total_chunks - total_processed)
+                        remaining_time = remaining_vectors / speed
+                        remaining_str = self._format_time(remaining_time)
+                    else:
+                        remaining_str = "计算中"
+                    
+                    elapsed_str = self._format_time(elapsed)
+                    progress_pct = (total_processed / total_chunks * 100) if total_chunks > 0 else 0
+                    
+                    time_str = time.strftime("%H:%M:%S")
+                    print(f"\r  [{time_str}] 进度: {progress_pct:5.1f}% ({total_processed:,}/{total_chunks:,}) | "
+                          f"速度: {speed:6.0f} chunks/s | "
+                          f"已耗时: {elapsed_str} | "
+                          f"预计剩余: {remaining_str}", end='', flush=True)
+                    
+                    last_progress_time = current_time
+                
+                # 定期保存（每5分钟）
+                if current_time - last_save_time > 300:
+                    print(f"\n[{time.strftime('%H:%M:%S')}] [save] 定期保存索引...")
+                    self._save_index()
+                    self._save_chunk_id_mapping()
+                    self._save_checkpoint()
+                    last_save_time = current_time
+                    print(f"[{time.strftime('%H:%M:%S')}] [save] 保存完成")
+                    
+                    # 强制垃圾回收
+                    gc.collect()
+                    torch.cuda.empty_cache() if torch.cuda.is_available() else None
         
-        # 最终保存
+        # 最终保存（听过墨是否压缩）
         print(f"\n\n[save] 最终保存...")
-        self._save_index()
+        final_compress = True  # 最后一次保存听过压缩
+        self._save_index(compress=final_compress)
         self._save_chunk_id_mapping()
         self._save_checkpoint()
         
@@ -328,6 +384,26 @@ class EmbeddingBuilderV2:
         print(f"  总耗时: {elapsed/60:.1f} 分钟")
         print(f"  平均速度: {total_vectors/elapsed:.0f} vec/s")
         print(f"{'='*80}")
+        
+        # 打印tokenizer性能统计（Qwen3）
+        if hasattr(self.embedding_model, 'get_tokenizer_stats'):
+            stats = self.embedding_model.get_tokenizer_stats()
+            if stats:
+                print(f"\n[Tokenizer性能]")
+                print(f"  平均batch耗时: {stats['avg_batch_time_ms']:.2f}ms")
+                print(f"  总分词耗时: {stats['total_tokenize_time_s']:.1f}s")
+                print(f"  平均吞吐: {stats['avg_tokens_per_sec']:.0f} tokens/s")
+                print(f"  处理批次: {stats['num_batches']}")
+        
+        # 打印encode性能统计（Jasper）
+        if hasattr(self.embedding_model, 'get_encode_stats'):
+            stats = self.embedding_model.get_encode_stats()
+            if stats:
+                print(f"\n[Encode性能]")
+                print(f"  平均batch耗时: {stats['avg_batch_time_ms']:.2f}ms")
+                print(f"  总encode耗时: {stats['total_encode_time_s']:.1f}s")
+                print(f"  平均吞吐: {stats['avg_texts_per_sec']:.0f} texts/s")
+                print(f"  处理批次: {stats['num_batches']}")
 
 
 def main(model_name: str = "qwen3"):
@@ -339,6 +415,10 @@ def main(model_name: str = "qwen3"):
     
     # 加载配置
     cfg = Config()
+    
+    # 获取Linux标志
+    use_linux = cfg.get("use_linux", default=False)
+    print(f"[config] use_linux: {use_linux}")
     
     # 配置路径
     chunks_path = "data/processed/chunks.parquet"
@@ -366,12 +446,27 @@ def main(model_name: str = "qwen3"):
     print(f"  index_path: {index_path}")
     print(f"  batch_size: {batch_size}")
     
-    embedding_model = Qwen3EmbeddingModel(
-        model_id=model_id,
-        device=device,
-        max_length=max_length,
-        dtype=dtype
-    )
+    # Qwen3和Jasper都支持flash-attn
+    use_flash_attn = use_linux and model_name in ["qwen3", "jasper"]
+    
+    if model_name == "qwen3":
+        embedding_model = Qwen3EmbeddingModel(
+            model_id=model_id,
+            device=device,
+            max_length=max_length,
+            dtype=dtype,
+            use_flash_attn=use_flash_attn
+        )
+    elif model_name == "jasper":
+        embedding_model = JasperEmbeddingModel(
+            model_id=model_id,
+            device=device,
+            max_length=max_length,
+            dtype=dtype,
+            use_flash_attn=use_flash_attn
+        )
+    else:
+        raise ValueError(f"不支持的模型: {model_name}")
     
     # 构建索引
     builder = EmbeddingBuilderV2(
@@ -391,7 +486,7 @@ if __name__ == "__main__":
     
     parser = argparse.ArgumentParser(description="构建FAISS索引 V2")
     parser.add_argument("--model", type=str, default="qwen3", 
-                       help="模型名称 (qwen3, bge_small, gte等)")
+                       help="模型名称 (qwen3, jasper等)")
     args = parser.parse_args()
     
     main(model_name=args.model)

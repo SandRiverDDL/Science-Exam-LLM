@@ -1,4 +1,6 @@
 # 全局配置
+use_linux: true                # 是否运行在Linux服务器上，启用faiss-gpu和flash-attn
+
 data:
   corpus_dir: "data/raw/articles"            # 文档目录（用于构建索引）
   csv_path: "data/raw/6000_train_examples.csv" # 如需读取问答数据可用
@@ -6,7 +8,11 @@ data:
     chunk_size_tokens: 256 #256
     chunk_overlap_tokens: 64 #50
 pipeline:
+<<<<<<< HEAD
   batch_size: 64           # 构建索引时的嵌入批量大小（提升至 8192 以充分利用 GPU）
+=======
+  batch_size: 64          # 批量大小（每次encode处理的chunk数）
+>>>>>>> 5836fdd540c37cc706a1e8bbe25c919f8dd4d77a
   log_embedding_stats: false # 关闭嵌入统计日志，减少 I/O 开销
   progress_interval_sec: 3   # 进度打印间隔（秒），降低至 3 秒获得更及时反馈
   # embed_from_tokens: true    # 直接使用分块生成的 token ids 进行嵌入
@@ -72,6 +78,15 @@ embedding:
     device: null   # 自动选择 cuda/cpu（建议在有 GPU 时设为 "cuda"）
     dtype: float16 # 在 CUDA 上用 FP16 提升吞吐；CPU 将回退 FP32
     index_path: "data/faiss/qwen3_fp16_ip.faiss"
+
+  jasper:
+    model_id: "infgrad/Jasper-Token-Compression-600M"
+    max_length: 168
+    device: null   # 自动选择 cuda/cpu
+    dtype: float16 # 在 CUDA 上用 FP16 提升吞吐
+    index_path: "data/faiss/jasper_fp16_ip.faiss"
+
+  
   # embedding_e5:
   #   model_id: "intfloat/multilingual-e5-large-instruct"
   #   max_length: 512

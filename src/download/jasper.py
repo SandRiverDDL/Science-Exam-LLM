@@ -1,7 +1,7 @@
 from sentence_transformers import SentenceTransformer
 
 model = SentenceTransformer("infgrad/Jasper-Token-Compression-600M", trust_remote_code=True)
-hf_token = os.environ.get("huggingface_token", None)
+
 sentences = [
     "That is a happy person",
     "That is a happy dog",
