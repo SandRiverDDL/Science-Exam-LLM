@@ -74,6 +74,8 @@ embedding:
     device: null   # 自动选择 cuda/cpu（建议在有 GPU 时设为 "cuda"）
     dtype: float16 # 在 CUDA 上用 FP16 提升吞吐；CPU 将回退 FP32
     index_path: "data/faiss/qwen3_fp16_ip.faiss"
+
+  
   # embedding_e5:
   #   model_id: "intfloat/multilingual-e5-large-instruct"
   #   max_length: 512

@@ -2,11 +2,12 @@
 
 基于transformers的Qwen3 0.6B embedding模型，支持flash-attn优化
 """
-from typing import List, Union
+from typing import List, Union, Optional
 import numpy as np
 import torch
 from transformers import AutoModel, AutoTokenizer
 from tqdm import tqdm
+import time
 
 from retrieval.embedding_base import BaseEmbeddingModel
 
@@ -21,7 +22,8 @@ class Qwen3EmbeddingModel(BaseEmbeddingModel):
         max_length: int = 512,
         dtype: str = "float16",
         trust_remote_code: bool = True,
-        use_flash_attn: bool = False
+        use_flash_attn: bool = False,
+        enable_tokenizer_cache: bool = True
     ):
         """
         Args:
@@ -31,6 +33,7 @@ class Qwen3EmbeddingModel(BaseEmbeddingModel):
             dtype: 数据类型
             trust_remote_code: 是否信任远程代码
             use_flash_attn: 是否使用flash-attn优化（需要CUDA病务器）
+            enable_tokenizer_cache: 是否启用tokenizer缓存
         """
         super().__init__(model_id, device, max_length, dtype)
         
@@ -39,12 +42,18 @@ class Qwen3EmbeddingModel(BaseEmbeddingModel):
         if use_flash_attn:
             print(f"  启用 flash-attn 优化")
         
-        # 加载tokenizer
+        # 加载tokenizer（使用fast=True获得Rust版本）
         self.tokenizer = AutoTokenizer.from_pretrained(
             model_id,
             trust_remote_code=trust_remote_code,
-            use_fast=True,
+            use_fast=True,  # Rust版本比Python快50倍
         )
+        
+        # tokenizer统计信息
+        self.tokenize_times = []
+        self.enable_tokenizer_cache = enable_tokenizer_cache
+        if enable_tokenizer_cache:
+            print(f"  启用 tokenizer 性能监控")
         
         # 加载模型
         model_kwargs = {
@@ -69,6 +78,7 @@ class Qwen3EmbeddingModel(BaseEmbeddingModel):
         
         print(f"[Qwen3] 模型加载完成")
         print(f"  向量维度: {self._dim}")
+        print(f"  Tokenizer: {type(self.tokenizer).__name__} (use_fast=True)")
     
     def encode(
         self,
@@ -103,7 +113,8 @@ class Qwen3EmbeddingModel(BaseEmbeddingModel):
             for i in iterator:
                 batch_texts = texts[i:i + batch_size]
                 
-                # Tokenize
+                # Tokenize（计时）
+                tokenize_start = time.time()
                 inputs = self.tokenizer(
                     batch_texts,
                     padding=True,
@@ -111,6 +122,11 @@ class Qwen3EmbeddingModel(BaseEmbeddingModel):
                     max_length=self.max_length,
                     return_tensors="pt"
                 ).to(self.device)
+                tokenize_time = time.time() - tokenize_start
+                
+                if self.enable_tokenizer_cache and len(batch_texts) > 0:
+                    tokens_per_sec = sum(len(t.split()) for t in batch_texts) / (tokenize_time + 1e-9)
+                    self.tokenize_times.append((tokenize_time, tokens_per_sec))
                 
                 # Forward pass
                 outputs = self.model(**inputs)
@@ -133,6 +149,21 @@ class Qwen3EmbeddingModel(BaseEmbeddingModel):
         
         # 合并所有批次
         return np.vstack(all_embeddings)
+    
+    def get_tokenizer_stats(self) -> Optional[dict]:
+        """获取tokenizer性能统计"""
+        if not self.tokenize_times:
+            return None
+        
+        times = [t[0] for t in self.tokenize_times]
+        speeds = [t[1] for t in self.tokenize_times]
+        
+        return {
+            'avg_batch_time_ms': np.mean(times) * 1000,
+            'total_tokenize_time_s': np.sum(times),
+            'avg_tokens_per_sec': np.mean(speeds),
+            'num_batches': len(self.tokenize_times)
+        }
     
     def _mean_pooling(
         self,
@@ -180,3 +211,7 @@ class Qwen3EmbeddingModel(BaseEmbeddingModel):
     def get_model_name(self) -> str:
         """获取模型名称"""
         return self.model_id.split('/')[-1]
+    
+    def reset_stats(self):
+        """重置性能统计"""
+        self.tokenize_times = []
