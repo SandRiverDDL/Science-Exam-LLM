@@ -40,6 +40,7 @@ sys.path.insert(0, str(project_root / 'src'))
 
 from core.config import Config
 from retrieval.embedding_qwen import Qwen3EmbeddingModel
+from retrieval.embedding_jasper import JasperEmbeddingModel
 from retrieval.embedding_base import BaseEmbeddingModel
 
 
@@ -133,8 +134,12 @@ class EmbeddingBuilderV2:
         with open(self.checkpoint_path, 'w', encoding='utf-8') as f:
             json.dump(checkpoint, f, ensure_ascii=False, indent=2)
     
-    def _save_index(self):
-        """保存FAISS索引（使用LZ4压缩）"""
+    def _save_index(self, compress=False):
+        """保存FAISS索引
+        
+        Args:
+            compress: 是否压缩（仅在最后一次保存时设为True）
+        """
         if self.index is None:
             return
         
@@ -143,23 +148,35 @@ class EmbeddingBuilderV2:
         # 保存索引
         faiss.write_index(self.index, self.index_path)
         
-        # 压缩索引（使用LZ4）
-        import lz4.frame
-        
-        compressed_path = self.index_path + ".lz4"
-        with open(self.index_path, 'rb') as f_in:
-            with lz4.frame.open(compressed_path, 'wb') as f_out:
-                f_out.write(f_in.read())
-        
         # 显示文件大小
         raw_size = os.path.getsize(self.index_path) / (1024**2)
-        compressed_size = os.path.getsize(compressed_path) / (1024**2)
-        ratio = (1 - compressed_size / raw_size) * 100 if raw_size > 0 else 0
-        
         print(f"[save] 索引已保存: {self.index_path}")
-        print(f"  原始大小: {raw_size:.2f} MB")
-        print(f"  压缩后: {compressed_size:.2f} MB (LZ4)")
-        print(f"  压缩率: {ratio:.1f}%")
+        print(f"  大小: {raw_size:.2f} MB")
+        
+        # 如果需要压缩，使用zstd（比LZ4更好的压缩率）
+        if compress:
+            try:
+                import zstandard as zstd
+                compressed_path = self.index_path + ".zst"
+                
+                with open(self.index_path, 'rb') as f_in:
+                    data = f_in.read()
+                    compressed_data = zstd.compress(data, level=10)
+                
+                with open(compressed_path, 'wb') as f_out:
+                    f_out.write(compressed_data)
+                
+                compressed_size = os.path.getsize(compressed_path) / (1024**2)
+                ratio = (1 - compressed_size / raw_size) * 100 if raw_size > 0 else 0
+                
+                print(f"  压缩后: {compressed_size:.2f} MB (zstd)")
+                print(f"  压缩率: {ratio:.1f}%")
+                
+                # 删除原始文件，只保留压缩版本
+                os.remove(self.index_path)
+                print(f"[save] 原始索引已删除，仅保留压缩版本")
+            except ImportError:
+                print(f"[warn] zstandard库未安装，跳过压缩")
     
     def _save_chunk_id_mapping(self):
         """保存chunk_id映射（faiss_id -> chunk_id）"""
@@ -237,6 +254,10 @@ class EmbeddingBuilderV2:
         
         # 初始化索引
         self._init_index()
+        
+        # 加载断点（如果有）
+        if self.resume:
+            self._load_checkpoint()
         
         # 读取chunks元数据
         print(f"\n[load] 读取chunks元数据...")
@@ -336,9 +357,10 @@ class EmbeddingBuilderV2:
                     gc.collect()
                     torch.cuda.empty_cache() if torch.cuda.is_available() else None
         
-        # 最终保存
+        # 最终保存（听过墨是否压缩）
         print(f"\n\n[save] 最终保存...")
-        self._save_index()
+        final_compress = True  # 最后一次保存听过压缩
+        self._save_index(compress=final_compress)
         self._save_chunk_id_mapping()
         self._save_checkpoint()
         
@@ -353,7 +375,7 @@ class EmbeddingBuilderV2:
         print(f"  平均速度: {total_vectors/elapsed:.0f} vec/s")
         print(f"{'='*80}")
         
-        # 打印tokenizer性能统计
+        # 打印tokenizer性能统计（Qwen3）
         if hasattr(self.embedding_model, 'get_tokenizer_stats'):
             stats = self.embedding_model.get_tokenizer_stats()
             if stats:
@@ -361,6 +383,16 @@ class EmbeddingBuilderV2:
                 print(f"  平均batch耗时: {stats['avg_batch_time_ms']:.2f}ms")
                 print(f"  总分词耗时: {stats['total_tokenize_time_s']:.1f}s")
                 print(f"  平均吞吐: {stats['avg_tokens_per_sec']:.0f} tokens/s")
+                print(f"  处理批次: {stats['num_batches']}")
+        
+        # 打印encode性能统计（Jasper）
+        if hasattr(self.embedding_model, 'get_encode_stats'):
+            stats = self.embedding_model.get_encode_stats()
+            if stats:
+                print(f"\n[Encode性能]")
+                print(f"  平均batch耗时: {stats['avg_batch_time_ms']:.2f}ms")
+                print(f"  总encode耗时: {stats['total_encode_time_s']:.1f}s")
+                print(f"  平均吞吐: {stats['avg_texts_per_sec']:.0f} texts/s")
                 print(f"  处理批次: {stats['num_batches']}")
 
 
@@ -404,16 +436,27 @@ def main(model_name: str = "qwen3"):
     print(f"  index_path: {index_path}")
     print(f"  batch_size: {batch_size}")
     
-    # 仅Qwen3支持flash-attn
-    use_flash_attn = use_linux and model_name == "qwen3"
+    # Qwen3和Jasper都支持flash-attn
+    use_flash_attn = use_linux and model_name in ["qwen3", "jasper"]
     
-    embedding_model = Qwen3EmbeddingModel(
-        model_id=model_id,
-        device=device,
-        max_length=max_length,
-        dtype=dtype,
-        use_flash_attn=use_flash_attn
-    )
+    if model_name == "qwen3":
+        embedding_model = Qwen3EmbeddingModel(
+            model_id=model_id,
+            device=device,
+            max_length=max_length,
+            dtype=dtype,
+            use_flash_attn=use_flash_attn
+        )
+    elif model_name == "jasper":
+        embedding_model = JasperEmbeddingModel(
+            model_id=model_id,
+            device=device,
+            max_length=max_length,
+            dtype=dtype,
+            use_flash_attn=use_flash_attn
+        )
+    else:
+        raise ValueError(f"不支持的模型: {model_name}")
     
     # 构建索引
     builder = EmbeddingBuilderV2(
@@ -433,7 +476,7 @@ if __name__ == "__main__":
     
     parser = argparse.ArgumentParser(description="构建FAISS索引 V2")
     parser.add_argument("--model", type=str, default="qwen3", 
-                       help="模型名称 (qwen3, bge_small, gte等)")
+                       help="模型名称 (qwen3, jasper等)")
     args = parser.parse_args()
     
     main(model_name=args.model)

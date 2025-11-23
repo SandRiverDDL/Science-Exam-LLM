@@ -75,6 +75,13 @@ embedding:
     dtype: float16 # 在 CUDA 上用 FP16 提升吞吐；CPU 将回退 FP32
     index_path: "data/faiss/qwen3_fp16_ip.faiss"
 
+  jasper:
+    model_id: "infgrad/Jasper-Token-Compression-600M"
+    max_length: 512
+    device: null   # 自动选择 cuda/cpu
+    dtype: float16 # 在 CUDA 上用 FP16 提升吞吐
+    index_path: "data/faiss/jasper_fp16_ip.faiss"
+
   
   # embedding_e5:
   #   model_id: "intfloat/multilingual-e5-large-instruct"
