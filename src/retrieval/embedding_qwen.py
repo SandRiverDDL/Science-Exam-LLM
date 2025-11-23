@@ -1,6 +1,6 @@
 """Qwen3 Embedding模型实现
 
-基于transformers的Qwen3 0.6B embedding模型
+基于transformers的Qwen3 0.6B embedding模型，支持flash-attn优化
 """
 from typing import List, Union
 import numpy as np
@@ -20,20 +20,24 @@ class Qwen3EmbeddingModel(BaseEmbeddingModel):
         device: str = "cuda",
         max_length: int = 512,
         dtype: str = "float16",
-        trust_remote_code: bool = True
+        trust_remote_code: bool = True,
+        use_flash_attn: bool = False
     ):
         """
         Args:
-            model_id: 模型ID（默认使用Qwen2-1.5B，也可以用更小的版本）
+            model_id: 模型 ID（默认使用Qwen2-1.5B，也可以用更小的版本）
             device: 设备
             max_length: 最大序列长度
             dtype: 数据类型
             trust_remote_code: 是否信任远程代码
+            use_flash_attn: 是否使用flash-attn优化（需要CUDA病务器）
         """
         super().__init__(model_id, device, max_length, dtype)
         
         print(f"[Qwen3] 加载模型: {model_id}")
         print(f"  Device: {device}, Dtype: {dtype}, Max length: {max_length}")
+        if use_flash_attn:
+            print(f"  启用 flash-attn 优化")
         
         # 加载tokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(
@@ -43,10 +47,18 @@ class Qwen3EmbeddingModel(BaseEmbeddingModel):
         )
         
         # 加载模型
+        model_kwargs = {
+            "torch_dtype": self.torch_dtype,
+            "trust_remote_code": trust_remote_code
+        }
+        
+        # 如果启用flash-attn，添加attn_implementation参数
+        if use_flash_attn:
+            model_kwargs["attn_implementation"] = "flash_attention_2"
+        
         self.model = AutoModel.from_pretrained(
             model_id,
-            torch_dtype=self.torch_dtype,
-            trust_remote_code=trust_remote_code
+            **model_kwargs
         ).to(device)
         
         # 设置为评估模式

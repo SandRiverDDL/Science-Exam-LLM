@@ -19,7 +19,18 @@ import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 import torch
-import faiss
+
+# 动态导入FAISS（优先使用faiss-gpu）
+try:
+    import faiss
+    # 检查是否为faiss-gpu版本
+    if hasattr(faiss, "get_num_gpus"):
+        print(f"[FAISS] 使用 faiss-gpu (GPU数量: {faiss.get_num_gpus()})")
+    else:
+        print(f"[FAISS] 使用 faiss-cpu")
+except ImportError as e:
+    print(f"[ERROR] 无法导入FAISS: {e}")
+    sys.exit(1)
 
 # 添加项目路径
 project_root = Path(__file__).parent.parent.parent
@@ -340,6 +351,10 @@ def main(model_name: str = "qwen3"):
     # 加载配置
     cfg = Config()
     
+    # 获取Linux标志
+    use_linux = cfg.get("use_linux", default=False)
+    print(f"[config] use_linux: {use_linux}")
+    
     # 配置路径
     chunks_path = "data/processed/chunks.parquet"
     documents_path = "data/processed/documents_cleaned.parquet"
@@ -366,11 +381,15 @@ def main(model_name: str = "qwen3"):
     print(f"  index_path: {index_path}")
     print(f"  batch_size: {batch_size}")
     
+    # 仅Qwen3支持flash-attn
+    use_flash_attn = use_linux and model_name == "qwen3"
+    
     embedding_model = Qwen3EmbeddingModel(
         model_id=model_id,
         device=device,
         max_length=max_length,
-        dtype=dtype
+        dtype=dtype,
+        use_flash_attn=use_flash_attn
     )
     
     # 构建索引
