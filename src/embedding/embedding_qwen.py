@@ -9,7 +9,11 @@ from transformers import AutoModel, AutoTokenizer
 from tqdm import tqdm
 import time
 
-from retrieval.embedding_base import BaseEmbeddingModel
+try:
+    from .embedding_base import BaseEmbeddingModel
+except ImportError:
+    # 绝对导入方式（用于直接脚本运行）
+    from retrieval.embedding_base import BaseEmbeddingModel
 
 
 class Qwen3EmbeddingModel(BaseEmbeddingModel):
