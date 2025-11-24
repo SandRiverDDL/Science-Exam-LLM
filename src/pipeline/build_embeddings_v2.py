@@ -180,7 +180,7 @@ class EmbeddingBuilderV2:
     
     def _save_chunk_id_mapping(self):
         """保存chunk_id映射（faiss_id -> chunk_id）"""
-        mapping_path = self.index_path.replace('.index', '_chunk_ids.json')
+        mapping_path = self.index_path.replace('.faiss', '_chunk_ids.json')
         with open(mapping_path, 'w', encoding='utf-8') as f:
             json.dump(self.chunk_id_list, f, ensure_ascii=False, indent=2)
         print(f"[save] Chunk ID映射已保存: {mapping_path}")
