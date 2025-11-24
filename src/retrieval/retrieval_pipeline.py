@@ -209,6 +209,9 @@ class RetrievalPipeline:
         retrieval_config = self.config.get('retrieval', {})
         reranker_config = retrieval_config.get('reranker', {})
         
+        # 外层batch_size（控制内存）
+        pipeline_batch_size = retrieval_config.get('batch_size', 512)
+        
         # Embedding batch_size
         query_encoder_config = retrieval_config.get('query_encoder', {})
         embedding_batch_size = query_encoder_config.get('batch_size', 32)
@@ -228,214 +231,198 @@ class RetrievalPipeline:
         
         if verbose:
             print("\n" + "="*70)
-            print(f"检索管道执行 (batch_size={num_queries})")
+            print(f"检索管道执行 (total_queries={num_queries}, pipeline_batch_size={pipeline_batch_size})")
             print("="*70)
         
-        # ===== Step 1: Dense Retrieval (FAISS on-disk) =====
-        if verbose:
-            print(f"\n[1] Dense Retrieval (top-{dense_top_k})...", end='', flush=True)
+        # ===== 外层批处理循环 =====
+        final_results_list = []
+        total_time_all = 0
         
-        time_dense_start = time.time()
-        with torch.no_grad():
-            dense_results_list = []
-            # 二次分batch：先为pipeline batch，然后embedding batch
-            for query_batch_start in range(0, num_queries, embedding_batch_size):
-                query_batch_end = min(query_batch_start + embedding_batch_size, num_queries)
-                query_batch = queries[query_batch_start:query_batch_end]
-                
-                # embedding一次性处理一个embedding batch
-                embeddings = self.dense_retriever.embedding_model.encode(
-                    query_batch,
-                    batch_size=embedding_batch_size
-                )
-                
-                # FAISS查询（支持批量，提供高效）
-                embeddings_fp32 = embeddings.astype(np.float32)
-                distances, indices = self.dense_retriever.index.search(embeddings_fp32, dense_top_k)
-                
-                # 转换为chunk_id和距离
-                for dist, idx in zip(distances, indices):
-                    results = []
-                    for d, i in zip(dist, idx):
-                        chunk_id = self.dense_retriever.chunk_ids[int(i)]
-                        similarity = float(d)
-                        results.append((chunk_id, similarity))
-                    dense_results_list.append(results)
-        
-        time_dense = time.time() - time_dense_start
-        
-        if verbose:
-            print(f" ✅ 找到 {sum(len(r) for r in dense_results_list)} 条 (耗时 {time_dense:.2f}s, {num_queries} queries)")
-        
-        # ===== Step 2: BM25 Reranking (仅对 Dense top-K 重打分) =====
-        if verbose:
-            print(f"[2] BM25 Reranking (rerank on top-{dense_top_k})...", end='', flush=True)
-        
-        time_bm25_start = time.time()
-        bm25_results_list = []
-        try:
-            for dense_results in dense_results_list:
-                # Dense 结果已经是 [(chunk_id, score), ...] 的格式
-                # 需要为Each chunk_id 求取对应的 text
-                candidates = []
-                for chunk_id, score in dense_results:
-                    # 从 reranker 中获取 chunk 文本
-                    chunk_text = self.reranker.get_chunk_text(chunk_id)
-                    if chunk_text:
-                        candidates.append({
-                            'chunk_id': chunk_id,
-                            'text': chunk_text,
-                            'score': score
-                        })
-                
-                # 用 BM25 对 Dense 的 top-K 进行重打分
-                if candidates:
-                    bm25_reranked = self.bm25.rerank(
-                        queries[len(bm25_results_list)],
-                        candidates,
-                        tokenizer=self.bm25_tokenizer
-                    )
-                    # rerank 结果已经是 [(chunk_id, score), ...] 格式
-                    bm25_results = bm25_reranked
-                else:
-                    bm25_results = []
-                
-                bm25_results_list.append(bm25_results)
+        for batch_start in range(0, num_queries, pipeline_batch_size):
+            batch_end = min(batch_start + pipeline_batch_size, num_queries)
+            batch_queries = queries[batch_start:batch_end]
+            batch_size = len(batch_queries)
             
-            time_bm25 = time.time() - time_bm25_start
             if verbose:
-                print(f" ✅ 重打分 {sum(len(r) for r in bm25_results_list)} 条 (耗时 {time_bm25:.2f}s, {num_queries} queries)")
-        except Exception as e:
-            time_bm25 = time.time() - time_bm25_start
-            bm25_results_list = [[] for _ in queries]
-            if verbose:
-                print(f" ❌ BM25 不可用: {e} (耗时 {time_bm25:.2f}s)")
-        
-        # ===== Step 3-5: 融合 (BM25 Rerank + RRF + Paragraph Boosting + MMR) =====
-        if verbose:
-            print(f"[3] RRF Fusion (rrf_k={rrf_k})...", end='', flush=True)
-        
-        time_fusion_start = time.time()
-        time_rrf_start = time.time()
-        
-        # RRF Fusion
-        rrf_results_list = []
-        for dense_results, bm25_results in zip(dense_results_list, bm25_results_list):
-            # RRF Fusion: 聚合 Dense 和 BM25 的结果
-            fused_results = RetrievalFusion.rrf_fusion(
-                dense_results, bm25_results, self.chunk_ids_list, rrf_k=rrf_k
-            )
-            rrf_results_list.append(fused_results)
-        
-        time_rrf = time.time() - time_rrf_start
-        
-        if verbose:
-            print(f" ✅")
-            print(f"    RRF 后 {sum(len(r) for r in rrf_results_list)} 条 (耗时 {time_rrf:.2f}s, {num_queries} queries)")
-        
-        # Paragraph Boosting: RRF 融合后、MMR 之前
-        if verbose:
-            print(f"[3.5] Paragraph Boosting (alpha={alpha})...", end='', flush=True)
-        
-        time_pb_start = time.time()
-        pb_results_list = []
-        
-        for rrf_results in rrf_results_list:
-            # 使用 RRF 结果进行 Paragraph Boosting
-            boosted_scores = RetrievalFusion.paragraph_boosting(
-                rrf_results, [], self.chunk_id_to_doc, alpha=alpha
-            )
-            # 应用 boosted scores
-            pb_results = [(cid, boosted_scores.get(cid, score)) for cid, score in rrf_results]
-            # 按 boosted score 排序
-            pb_results = sorted(pb_results, key=lambda x: x[1], reverse=True)
-            pb_results_list.append(pb_results)
-        
-        time_pb = time.time() - time_pb_start
-        
-        if verbose:
-            print(f" ✅")
-            print(f"    Boosting 后 {sum(len(r) for r in pb_results_list)} 条 (耗时 {time_pb:.2f}s, {num_queries} queries)")
-        
-        # MMR Reranking
-        if verbose:
-            print(f"[3.6] MMR Reranking (lambda={mmr_lambda})...", end='', flush=True)
-        
-        time_mmr_start = time.time()
-        fused_results_list = []
-        
-        for pb_results in pb_results_list:
-            # MMR Reranking
-            mmr_results = RetrievalFusion.mmr_reranking(
-                pb_results, {}, lambda_param=mmr_lambda, top_k=mmr_top_k
-            )
-            # 截断：仅输入 top-20 给 reranker（关键性能优化）
-            fused_results_list.append(mmr_results)
-        
-        time_mmr = time.time() - time_mmr_start
-        
-        if verbose:
-            print(f" ✅")
-            print(f"    MMR 后 {sum(len(r) for r in fused_results_list)} 条 (耗时 {time_mmr:.2f}s, {num_queries} queries)")
-        
-        time_fusion = time.time() - time_fusion_start
-        
-        # ===== Step 6: Cross-Encoder Reranking（仅对 top-20） =====
-        if self.reranker_model is not None:
-            if verbose:
-                print(f"[4] Cross-Encoder Reranking (top-{reranker_top_k})...", end='', flush=True)
+                print(f"\n[批处理] 处理查询 {batch_start+1}-{batch_end} (共 {batch_size} 个)")
             
-            time_reranker_start = time.time()
-            reranker_batch_size = reranker_config.get('batch_size', 8)
+            time_batch_start = time.time()
             
+            # ===== Step 1: Dense Retrieval (FAISS on-disk) =====
+            if verbose:
+                print(f"  [1] Dense Retrieval (top-{dense_top_k})...", end='', flush=True)
+            
+            time_dense_start = time.time()
             with torch.no_grad():
-                final_results_list = []
-                for query, mmr_results in zip(queries, fused_results_list):
-                    mmr_chunk_ids = [cid for cid, _ in mmr_results]
+                dense_results_list = []
+                # 二次分batch：先为pipeline batch，然后embedding batch
+                for query_batch_start in range(0, batch_size, embedding_batch_size):
+                    query_batch_end = min(query_batch_start + embedding_batch_size, batch_size)
+                    query_batch = batch_queries[query_batch_start:query_batch_end]
                     
-                    # 将chunk_ids分成小 batch（reranker极小 batch）
-                    chunk_results = []
-                    for chunk_batch_start in range(0, len(mmr_chunk_ids), reranker_batch_size):
-                        chunk_batch_end = min(chunk_batch_start + reranker_batch_size, len(mmr_chunk_ids))
-                        chunk_batch = mmr_chunk_ids[chunk_batch_start:chunk_batch_end]
-                        
-                        # reranker批处理
-                        batch_results = self.reranker.rerank(
-                            query, chunk_batch, self.reranker_model, top_k=len(chunk_batch)
+                    # embedding一次性处理一个embedding batch
+                    embeddings = self.dense_retriever.embedding_model.encode(
+                        query_batch,
+                        batch_size=embedding_batch_size
+                    )
+                    
+                    # FAISS查询（支持批量，提供高效）
+                    embeddings_fp32 = embeddings.astype(np.float32)
+                    distances, indices = self.dense_retriever.index.search(embeddings_fp32, dense_top_k)
+                    
+                    # 转换为chunk_id和距离
+                    for dist, idx in zip(distances, indices):
+                        results = []
+                        for d, i in zip(dist, idx):
+                            chunk_id = self.dense_retriever.chunk_ids[int(i)]
+                            similarity = float(d)
+                            results.append((chunk_id, similarity))
+                        dense_results_list.append(results)
+            
+            time_dense = time.time() - time_dense_start
+            
+            if verbose:
+                print(f" ✅ {time_dense:.2f}s")
+            
+            # ===== Step 2: BM25 Reranking (仅对 Dense top-K 重打分) =====
+            if verbose:
+                print(f"  [2] BM25 Reranking (rerank on top-{dense_top_k})...", end='', flush=True)
+            
+            time_bm25_start = time.time()
+            bm25_results_list = []
+            try:
+                for query_idx, dense_results in enumerate(dense_results_list):
+                    # Dense 结果已经是 [(chunk_id, score), ...] 的格式
+                    # 需要为Each chunk_id 求取对应的 text
+                    candidates = []
+                    for chunk_id, score in dense_results:
+                        # 从 reranker 中获取 chunk 文本
+                        chunk_text = self.reranker.get_chunk_text(chunk_id)
+                        if chunk_text:
+                            candidates.append({
+                                'chunk_id': chunk_id,
+                                'text': chunk_text,
+                                'score': score
+                            })
+                    
+                    # 用 BM25 对 Dense 的 top-K 进行重打分
+                    if candidates:
+                        bm25_reranked = self.bm25.rerank(
+                            batch_queries[query_idx],
+                            candidates,
+                            tokenizer=self.bm25_tokenizer
                         )
-                        chunk_results.extend(batch_results)
+                        # rerank 结果已经是 [(chunk_id, score), ...] 格式
+                        bm25_results = bm25_reranked
+                    else:
+                        bm25_results = []
                     
-                    # 排序并截断至top-k
-                    final_results = sorted(chunk_results, key=lambda x: x[1], reverse=True)[:reranker_top_k]
-                    final_results_list.append(final_results)
+                    bm25_results_list.append(bm25_results)
+                
+                time_bm25 = time.time() - time_bm25_start
+                if verbose:
+                    print(f" ✅ {time_bm25:.2f}s")
+            except Exception as e:
+                time_bm25 = time.time() - time_bm25_start
+                bm25_results_list = [[] for _ in batch_queries]
+                if verbose:
+                    print(f" ❌ {e} ({time_bm25:.2f}s)")
             
-            time_reranker = time.time() - time_reranker_start
+            # ===== Step 3-5: 融合 (BM25 Rerank + RRF + Paragraph Boosting + MMR) =====
+            if verbose:
+                print(f"  [3] RRF/PB/MMR Fusion...", end='', flush=True)
+            
+            time_fusion_start = time.time()
+            
+            # RRF Fusion
+            rrf_results_list = []
+            for dense_results, bm25_results in zip(dense_results_list, bm25_results_list):
+                # RRF Fusion: 聚合 Dense 和 BM25 的结果
+                fused_results = RetrievalFusion.rrf_fusion(
+                    dense_results, bm25_results, self.chunk_ids_list, rrf_k=rrf_k
+                )
+                rrf_results_list.append(fused_results)
+            
+            # Paragraph Boosting: RRF 融合后、MMR 之前
+            pb_results_list = []
+            
+            for rrf_results in rrf_results_list:
+                # 使用 RRF 结果进行 Paragraph Boosting
+                boosted_scores = RetrievalFusion.paragraph_boosting(
+                    rrf_results, [], self.chunk_id_to_doc, alpha=alpha
+                )
+                # 应用 boosted scores
+                pb_results = [(cid, boosted_scores.get(cid, score)) for cid, score in rrf_results]
+                # 按 boosted score 排序
+                pb_results = sorted(pb_results, key=lambda x: x[1], reverse=True)
+                pb_results_list.append(pb_results)
+            
+            # MMR Reranking
+            fused_results_list = []
+            
+            for pb_results in pb_results_list:
+                # MMR Reranking
+                mmr_results = RetrievalFusion.mmr_reranking(
+                    pb_results, {}, lambda_param=mmr_lambda, top_k=mmr_top_k
+                )
+                # 截断：仅输入 top-20 给 reranker（关键性能优化）
+                fused_results_list.append(mmr_results)
+            
+            time_fusion = time.time() - time_fusion_start
             
             if verbose:
-                print(f" ✅ 最终 {sum(len(r) for r in final_results_list)} 条 (耗时 {time_reranker:.2f}s, {num_queries} queries)")
-        else:
-            if verbose:
-                print(f"[4] Cross-Encoder Reranking: ⏭️  跳过（未加载 reranker）")
-            final_results_list = [[(cid, score) for cid, score in mmr_results[:reranker_top_k]] for mmr_results in fused_results_list]
-        
-        if verbose:
-            print("="*70)
-            print(f"\n[性能统计]")
-            print(f"  Dense Retrieval:      {time_dense:.2f}s ({num_queries} queries)")
-            print(f"  BM25 Reranking:       {time_bm25:.2f}s ({num_queries} queries)")
-            print(f"  Fusion (RRF + PB + MMR):")
-            print(f"    - RRF:              {time_rrf:.2f}s ({num_queries} queries)")
-            print(f"    - Paragraph Boost:  {time_pb:.2f}s ({num_queries} queries)")
-            print(f"    - MMR:              {time_mmr:.2f}s ({num_queries} queries)")
-            print(f"    - Subtotal:         {time_fusion:.2f}s ({num_queries} queries)")
+                print(f" ✅ {time_fusion:.2f}s")
+            
+            # ===== Step 6: Cross-Encoder Reranking（仅对 top-20） =====
             if self.reranker_model is not None:
-                print(f"  Reranker:             {time_reranker:.2f}s ({num_queries} queries)")
-                total_time = time_dense + time_bm25 + time_fusion + time_reranker
+                if verbose:
+                    print(f"  [4] Cross-Encoder Reranking (top-{reranker_top_k})...", end='', flush=True)
+                
+                time_reranker_start = time.time()
+                reranker_batch_size = reranker_config.get('batch_size', 8)
+                
+                with torch.no_grad():
+                    batch_final_results = []
+                    # 外层进度条：每个query
+                    for query_idx, (query, mmr_results) in enumerate(tqdm(
+                        zip(batch_queries, fused_results_list),
+                        total=len(batch_queries),
+                        desc="Reranker处理",
+                        unit="query"
+                    )):
+                        mmr_chunk_ids = [cid for cid, _ in mmr_results]
+                        
+                        # 将chunk_ids分成小 batch（reranker极小 batch）
+                        chunk_results = []
+                        for chunk_batch_start in range(0, len(mmr_chunk_ids), reranker_batch_size):
+                            chunk_batch_end = min(chunk_batch_start + reranker_batch_size, len(mmr_chunk_ids))
+                            chunk_batch = mmr_chunk_ids[chunk_batch_start:chunk_batch_end]
+                            
+                            # reranker批处理
+                            batch_results = self.reranker.rerank(
+                                query, chunk_batch, self.reranker_model, top_k=len(chunk_batch)
+                            )
+                            chunk_results.extend(batch_results)
+                        
+                        # 排序并截断至top-k
+                        final_results = sorted(chunk_results, key=lambda x: x[1], reverse=True)[:reranker_top_k]
+                        batch_final_results.append(final_results)
+                
+                time_reranker = time.time() - time_reranker_start
+                
+                if verbose:
+                    print(f" ✅ {time_reranker:.2f}s")
             else:
-                total_time = time_dense + time_bm25 + time_fusion
-            print(f"  \u603b耗时:          {total_time:.2f}s")
-            print(f"  平均耗时/query:  {total_time/num_queries:.2f}s")
-            print("="*70 + "\n")
+                batch_final_results = [[(cid, score) for cid, score in mmr_results[:reranker_top_k]] for mmr_results in fused_results_list]
+            
+            # 追加到总结果
+            final_results_list.extend(batch_final_results)
+            
+            time_batch = time.time() - time_batch_start
+            total_time_all += time_batch
+            
+            if verbose:
+                print(f"  批处理完成: {time_batch:.2f}s\n")
         
         # 返回结果（处理单/多查询）
         if is_single_query:
