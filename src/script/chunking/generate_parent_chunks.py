@@ -392,7 +392,7 @@ def main():
     parser.add_argument(
         '--output-dir',
         type=str,
-        default='data/processed/chunks_refined.parquet',
+        default='data/processed/chunks',
         help='输出目录'
     )
     

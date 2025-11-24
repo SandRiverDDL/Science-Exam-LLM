@@ -38,4 +38,4 @@ Tone: Authoritative, terse, strictly technical.
    • Flag critical risks only.
    • END OF RESPONSE.
 6. 当你写的代码涉及到一些超参数时，暴露到项目目录的config.yaml
-7. 能够调用其他代码文件实现的功能就不要再实现，注意模块化
+7. 能够调用其他代码文件实现的功能就不要再实现，注意模块化和批处理，多用索引，尽量少使用python循环

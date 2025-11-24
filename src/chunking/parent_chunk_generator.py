@@ -17,10 +17,17 @@ from typing import List, Dict, Tuple, Any, Optional
 from pathlib import Path
 
 try:
-    import blingfire
+    from blingfire import text_to_sentences
     HAS_BLINGFIRE = True
 except ImportError:
     HAS_BLINGFIRE = False
+
+try:
+    import spacy
+    nlp = spacy.load("en_core_web_sm")
+    HAS_SPACY = True
+except ImportError:
+    HAS_SPACY = False
 
 
 class ParentChunkGenerator:
@@ -65,8 +72,7 @@ class ParentChunkGenerator:
     ) -> List[Tuple[str, int, int]]:
         """将文本切分为句子，保留字符位置
         
-        使用Blingfire进行高效句子切分（如果可用），
-        否则回退到正则表达式方案
+        优先级：Blingfire > spaCy > 正则表达式
         
         Args:
             text: 输入文本
@@ -75,10 +81,10 @@ class ParentChunkGenerator:
             [(sentence_text, start_char, end_char), ...]
         """
         if HAS_BLINGFIRE:
-            # 使用Blingfire进行句子切分
             return self._split_sentences_blingfire(text)
+        elif HAS_SPACY:
+            return self._split_sentences_spacy(text)
         else:
-            # 回退正则表达式方案
             return self._split_sentences_regex(text)
     
     def _split_sentences_blingfire(
@@ -88,10 +94,9 @@ class ParentChunkGenerator:
         """使用Blingfire进行高效的句子切分
         
         优点:
-        - 极快（比 spaCy 快 10～50 倍）
-        - 纯 C++ 核心，Python 调用开销极小
-        - 已经内置 sentence tokenizer
-        - 不会误切 "Dr." "e.g." 等缩写
+        - 极快（比spaCy快很多）
+        - 不需要加载NLP模型
+        - 内置C++优化
         
         Args:
             text: 输入文本
@@ -102,26 +107,63 @@ class ParentChunkGenerator:
         sentences = []
         
         try:
-            # Blingfire输出每个句子一行
-            sentence_str = blingfire.text_to_sentences(text)
-            sent_list = [s.strip() for s in sentence_str.split("\n") if s.strip()]
+            # 获取不含换行的句子
+            sentences_str = text_to_sentences(text)
+            if isinstance(sentences_str, str):
+                sent_list = sentences_str.strip().split("\n")
+            else:
+                sent_list = sentences_str
             
-            # 重新计算字符位置
+            # 通过find获取字符位置
             current_pos = 0
             for sent_text in sent_list:
-                # 在原文中找到这个句子
-                found_pos = text.find(sent_text, current_pos)
-                if found_pos >= 0:
-                    start = found_pos
-                    end = found_pos + len(sent_text)
+                sent_text = sent_text.strip()
+                if not sent_text:
+                    continue
+                
+                # 在原文中找到此句子
+                start = text.find(sent_text, current_pos)
+                if start >= 0:
+                    end = start + len(sent_text)
                     sentences.append((sent_text, start, end))
                     current_pos = end
-                else:
-                    # 备选：不找到时使用第一个字符位置
-                    sentences.append((sent_text, current_pos, current_pos + len(sent_text)))
-                    current_pos += len(sent_text)
         except Exception as e:
-            print(f"[警告] Blingfire处理失败: {e}，回退正则方案")
+            print(f"[警告] Blingfire处理失败: {e}，回退spaCy方案")
+            if HAS_SPACY:
+                sentences = self._split_sentences_spacy(text)
+            else:
+                sentences = self._split_sentences_regex(text)
+        
+        return sentences
+    
+    def _split_sentences_spacy(
+        self,
+        text: str
+    ) -> List[Tuple[str, int, int]]:
+        """使用spaCy进行句子切分（备选）
+        
+        优点:
+        - 可正确处理Dr.、e.g.等缩写
+        - 返回准确的字符offset
+        
+        Args:
+            text: 输入文本
+        
+        Returns:
+            [(sentence_text, start_char, end_char), ...]
+        """
+        sentences = []
+        
+        try:
+            doc = nlp(text)
+            for sent in doc.sents:
+                start = sent.start_char
+                end = sent.end_char
+                sent_text = text[start:end]
+                if sent_text.strip():
+                    sentences.append((sent_text, start, end))
+        except Exception as e:
+            print(f"[警告] spaCy处理失败: {e}，回退正则方案")
             sentences = self._split_sentences_regex(text)
         
         return sentences
@@ -250,61 +292,58 @@ class ParentChunkGenerator:
             return parent_chunks
         
         # Step 2: 聚合句子形成父chunks
-        current_parent_text = ""
-        current_start_char = sentences[0][1]  # 使用字符位置
-        current_end_char = sentences[0][1]
+        current_start_char = sentences[0][1]
+        current_end_char = sentences[0][2]
+        current_token_count = 0
         parent_count = 0
         
         for sent_text, sent_start, sent_end in sentences:
-            # 尝试添加这个句子
-            test_text = (current_parent_text + " " + sent_text).strip() if current_parent_text else sent_text
-            test_tokens = self.count_tokens(test_text)
+            sent_tokens = self.count_tokens(sent_text)
             
             # 判断是否超过大小限制
-            if test_tokens > available_size and current_parent_text:
-                # 保存当前父chunk
+            if current_token_count + sent_tokens > available_size and current_token_count > 0:
+                # 保存当前父chunk（直接从原文提取）
+                chunk_text = text[current_start_char:current_end_char]
                 parent_chunks.append(self._create_parent_chunk(
                     doc_id=doc_id,
                     chunk_index=parent_count,
-                    text=current_parent_text.strip(),
+                    text=chunk_text,
                     start_char=current_start_char,
                     end_char=current_end_char,
-                    title=title
+                    title=title,
+                    token_count=current_token_count
                 ))
                 
                 # 开始新父chunk
-                current_parent_text = sent_text
                 current_start_char = sent_start
                 current_end_char = sent_end
+                current_token_count = sent_tokens
                 parent_count += 1
             else:
-                # 添加到当前父chunk
-                if current_parent_text:
-                    current_parent_text += " " + sent_text
-                else:
-                    current_parent_text = sent_text
+                # 扩展当前父chunk
+                if current_token_count == 0:
                     current_start_char = sent_start
                 current_end_char = sent_end
+                current_token_count += sent_tokens
         
         # 保存最后一个父chunk
-        if current_parent_text.strip():
-            # 检查大小是否满足最小要求
-            if self.count_tokens(current_parent_text) >= self.min_parent_tokens:
-                parent_chunks.append(self._create_parent_chunk(
-                    doc_id=doc_id,
-                    chunk_index=parent_count,
-                    text=current_parent_text.strip(),
-                    start_char=current_start_char,
-                    end_char=current_end_char,
-                    title=title
-                ))
-            elif parent_chunks:
-                # 如果过小，合并到上一个parent_chunk
-                last_chunk = parent_chunks[-1]
-                combined_text = last_chunk['text'] + " " + current_parent_text
-                last_chunk['text'] = combined_text
-                last_chunk['end_char'] = current_end_char
-                last_chunk['token_count'] = self.count_tokens(combined_text)
+        if current_token_count >= self.min_parent_tokens:
+            chunk_text = text[current_start_char:current_end_char]
+            parent_chunks.append(self._create_parent_chunk(
+                doc_id=doc_id,
+                chunk_index=parent_count,
+                text=chunk_text,
+                start_char=current_start_char,
+                end_char=current_end_char,
+                title=title,
+                token_count=current_token_count
+            ))
+        elif parent_chunks and current_token_count > 0:
+            # 合并到上一个父chunk
+            last_chunk = parent_chunks[-1]
+            last_chunk['end_char'] = current_end_char
+            last_chunk['text'] = text[last_chunk['start_char']:current_end_char]
+            last_chunk['token_count'] += current_token_count
         
         return parent_chunks
     
@@ -315,7 +354,8 @@ class ParentChunkGenerator:
         text: str,
         start_char: int,
         end_char: int,
-        title: str = ""
+        title: str = "",
+        token_count: int = None
     ) -> Dict[str, Any]:
         """创建单个父chunk记录
         
@@ -326,6 +366,7 @@ class ParentChunkGenerator:
             start_char: 起始字符位置
             end_char: 结束字符位置
             title: 文档标题
+            token_count: 预计算的token数（性能优化）
         
         Returns:
             父chunk记录
@@ -336,8 +377,8 @@ class ParentChunkGenerator:
             'title': title,
             'start_char': start_char,
             'end_char': end_char,
-            'text': text,  # 保留文本用于验证
-            'token_count': self.count_tokens(text)
+            'text': text,
+            'token_count': token_count if token_count is not None else self.count_tokens(text)
         }
     
     def map_child_to_parent(
