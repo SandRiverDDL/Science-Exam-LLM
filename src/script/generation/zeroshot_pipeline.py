@@ -135,7 +135,6 @@ def generate_answers_batch(
             question=question,
             options=options,
             context=context,
-            system_prompt=SYSTEM_PROMPT
         )
         prompts.append(prompt)
     
