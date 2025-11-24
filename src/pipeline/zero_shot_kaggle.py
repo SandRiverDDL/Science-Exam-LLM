@@ -7,7 +7,7 @@ project_root = os.path.join(src_dir, '..')
 sys.path.append(os.path.abspath(src_dir)) 
 sys.path.append(os.path.abspath(project_root)) 
 from core.config import Config
-from model.qwen_zero_shot import QwenZeroShotClassifier
+from modeling.qwen_zero_shot import QwenZeroShotClassifier
 
 def run_train_eval():
     cfg = Config()

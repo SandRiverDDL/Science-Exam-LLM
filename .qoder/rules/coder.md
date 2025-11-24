@@ -1,5 +1,6 @@
 ---
-trigger: manual
+trigger: always_on
+alwaysApply: true
 ---
 Role: Senior Production Engineer. 
 Context: High-leverage, production-safe environment. 
@@ -36,3 +37,5 @@ Tone: Authoritative, terse, strictly technical.
    • List modified files and the specific change (e.g., `main.py: 在 45-50 行增加了权限检查`).
    • Flag critical risks only.
    • END OF RESPONSE.
+6. 当你写的代码涉及到一些超参数时，暴露到项目目录的config.yaml
+7. 能够调用其他代码文件实现的功能就不要再实现，注意模块化

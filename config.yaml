@@ -1,74 +1,17 @@
 # 全局配置
-use_linux: true                # 是否运行在Linux服务器上，启用faiss-gpu和flash-attn
+use_linux: false                # 是否运行在Linux服务器上，启用faiss-gpu和flash-attn
 
 data:
   corpus_dir: "data/raw/articles"            # 文档目录（用于构建索引）
   csv_path: "data/raw/6000_train_examples.csv" # 如需读取问答数据可用
-  chunking:
-    chunk_size_tokens: 256 #256
-    chunk_overlap_tokens: 64 #50
 pipeline:
-<<<<<<< HEAD
   batch_size: 64           # 构建索引时的嵌入批量大小（提升至 8192 以充分利用 GPU）
-=======
-  batch_size: 64          # 批量大小（每次encode处理的chunk数）
->>>>>>> 5836fdd540c37cc706a1e8bbe25c919f8dd4d77a
-  log_embedding_stats: false # 关闭嵌入统计日志，减少 I/O 开销
-  progress_interval_sec: 3   # 进度打印间隔（秒），降低至 3 秒获得更及时反馈
-  # embed_from_tokens: true    # 直接使用分块生成的 token ids 进行嵌入
-  # embed_tokens_model: bge_small  # 与直通 ids 对齐的嵌入模型（bge_small|bge|gte|qwen3）
-  periodic_save:
-    sec: 60                  # 每隔 1 分钟保存一次索引（用于测试断点续跑）
-    chunks: 0                # 禁用按 chunk 数量保存
-  resume:
-    enabled: true            # 启用断点续跑（加载已有索引，跳过已处理 chunk）
-    checkpoint_path: "data/faiss/checkpoints/embedding_progress.json"
-    skip_duplicate_check: true  # 跳过重复检查（仅信任 checkpoint，性能更好）
-
-# Embedding（现阶段仅一路：Jina v4 GGUF）
-# embedding_jina:
-#   backend: "llama_cpp_gguf"
-#   repo_id: "jinaai/jina-embeddings-v4-text-retrieval-GGUF"
-#   filename: "jina-embeddings-v4-text-retrieval-F16.gguf"
-#   n_ctx: 8192
-#   n_threads: 8
-#   n_batch: 32
-#   n_seq_max: 128
 
 # FAISS 索引
 index:
   type: "flat_ip_fp16"        # 使用 FP16 ScalarQuantizer，实现内积语义 + 节省内存
   save_path: "data/faiss/index_fp16_ip.faiss"
   dim: null                   # 自动根据第一条向量维度确定
-
-indices:
-  # jina:
-  #   enabled: false
-  #   index_path: "data/faiss/jina_fp16_ip.faiss"
-  #   meta_path: "data/faiss/jina_meta.json"
-  #   meta_jsonl_path: "data/faiss/jina_meta.jsonl"   # 流式写出 meta+text 的 JSONL 文件
-  bge:
-    enabled: false
-    index_path: "data/faiss/bge_m3_fp16_ip.faiss"
-    meta_path: "data/faiss/bge_m3_meta.json"
-  bge_small:
-    enabled: true
-    index_path: "data/faiss/bge_small_fp16_ip.faiss"
-    chunk_id_map_path: "data/faiss/bge_small_chunk_id_map.json"  # faiss_id -> chunk_id映射
-    meta_path: "data/faiss/bge_small_meta.json"  # 已废弃，metadata从chunks Parquet读取
-    meta_jsonl_path: "data/faiss/bge_small_meta.jsonl"  # 已废弃
-  qwen3:
-    enabled: false
-    index_path: "data/faiss/qwen3_fp16_ip.faiss"
-    meta_path: "data/faiss/qwen3_meta.json"
-  e5:
-    enabled: false
-    index_path: "data/faiss/e5_fp16_ip.faiss"
-    meta_path: "data/faiss/e5_meta.json"
-  gte:
-    enabled: false
-    index_path: "data/faiss/gte_fp16_ip.faiss"
-    meta_path: "data/faiss/gte_meta.json"
 
 # 其他 HF Embedding 模型配置（按需启用）
 embedding:
@@ -85,30 +28,6 @@ embedding:
     device: null   # 自动选择 cuda/cpu
     dtype: float16 # 在 CUDA 上用 FP16 提升吞吐
     index_path: "data/faiss/jasper_fp16_ip.faiss"
-
-  
-  # embedding_e5:
-  #   model_id: "intfloat/multilingual-e5-large-instruct"
-  #   max_length: 512
-  #   device: null  # 自动选择 cuda/cpu
-
-  # embedding_bge:
-  #   model_id: "BAAI/bge-m3"
-  #   max_length: 256
-  #   device: null  # 自动选择 cuda/cpu
-  #   dtype: float16
-
-  # embedding_gte:
-  #   model_id: "Alibaba-NLP/gte-multilingual-base"
-  #   max_length: 512
-  #   device: null  # 自动选择 cuda/cpu
-  #   dtype: float16            # 在 CUDA 上用 FP16 加速（CPU将回退为 FP32）
-
-  # embedding_bge_small:
-  #   model_id: "BAAI/bge-small-en-v1.5"
-  #   max_length: 256           # 提升至 256，更好地利用模型能力
-  #   device: null              # 自动选择 cuda/cpu
-  #   dtype: float16
 
   # Qwen3 Embedding 模型配置（可选）
 
@@ -128,22 +47,48 @@ preprocessing:
 # 父文档索引 (Parent Document) Chunking配置
 chunking:
   child_size: 128    # 子chunk大小（用于精准检索）
-  parent_size: 512   # 父chunk大小（用于LLM上下文）
+  parent_size: 256   # 父chunk大小（用于LLM上下文）
 
 # 检索参数
 retrieval:
-  top_k_embedding: 50         # Embedding Top-K
-  bm25_top_k: 30              # BM25 辅助 Top-K（不作为主检索）
-  fusion:
-    rrf_k: 60                 # RRF 参数
-    use_rbf: false            # 先关掉非线性融合，后续可实验
+  # Dense Retrieval配置
+  query_encoder:
+    model_id: "Qwen/Qwen3-Embedding-0.6B"
+    batch_size: 32
+    max_length: 168
+    device: null   # 自动选择 cuda/cpu（建议在有 GPU 时设为 "cuda"）
+    dtype: float16 # 在 CUDA 上用 FP16 提升吞吐；CPU 将回退 FP32
 
-# Reranker（可选，提示式评分；若不稳定可关闭）
-reranker:
-  enabled: true
-  repo_id: "jinaai/jina-reranker-v3-GGUF"
-  filename: "jina-reranker-v3-BF16.gguf"
-  max_docs: 10
+  # Dense ANN 检索
+  dense:
+    batch_size: 64
+    top_k: 600             # Dense检索的top-k（对128万库推荐600）
+  
+  # BM25配置
+  bm25:
+    index_path: "data/processed/bm25_index"  # BM25索引保存路径（parquet格式目录）
+    k1: 1.5                # BM25参数k1（调整TF饱和点，值大=更重视TF差异）
+    b: 0.75                # BM25参数b（调整长度归一化，0=无长度归一化，1=完全归一化）
+  
+  # Paragraph Boosting配置（段落指数增强）
+  paragraph_boosting:
+    alpha: 0.03             # 增强系数（0.02-0.04），公式: score * (1 + alpha * exp(n))
+  
+  # RRF融合配置
+  fusion:
+    rrf_k: 30               # RRF参数k，值越小名次越敏感（推荐30-50，大库推荐30）
+  
+  # MMR重排序配置
+  mmr:
+    lambda: 0.8             # 相关性权重（0.8表示强调相关性，轻度去重）
+    top_k: 20              # MMR返回数量，用于reranker（推荐400-500）
+
+  # Reranker（可选，提示式评分；若不稳定可关闭）
+  reranker:
+    model_id: "jinaai/jina-reranker-v3"
+    batch_size: 4               # 批处理大小（reranker 极小 batch，1-8）
+    device: null                 # 自动选择 cuda/cpu（建议在有 GPU 时设为 "cuda"）
+    top_k: 3                     # 最终返回给LLM的数量（推荐3-5）
 
 # Qwen3 Zero-shot 分类
 qwen:
@@ -158,6 +103,13 @@ zero_shot:
   force_output_digits: true   # 强制模型仅输出 0 或 1 的提示词
   use_kv_cache_prefix: true   # 对相同问题复用前缀 KV cache
   question_repeat: true       # 问题相同场景
+  test_csv: "data/raw/kaggle-llm-science-exam/test.csv"  # 测试集路径
+  val_csv: "data/raw/kaggle-llm-science-exam/sample_submission.csv"  # 验证集路径（可选）
+  output: "output/predictions_zeroshot.csv"  # 输出预测路径
+  retrieval_batch_size: 8     # 检索批处理大小
+  generation_batch_size: 1    # 生成批处理大小
+  do_sample: false
+
 kaggle:
   train_csv: "data/raw/kaggle-llm-science-exam/train.csv"
   sample_submission_csv: "data/raw/kaggle-llm-science-exam/sample_submission.csv"
