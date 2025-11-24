@@ -93,7 +93,7 @@ retrieval:
 
 # Qwen3 Zero-shot 分类
 qwen:
-  model_id: "ISTA-DASLab/Qwen3-8B-Instruct-FPQuant-QAT-MXFP4-TEMP"
+  model_id: "Qwen/Qwen3-8B"
   device_map: "auto"
   max_new_tokens: 1           # 分类仅需 1 个 token（0 或 1）
   gen_temperature: 0.0        # 关闭采样
@@ -102,14 +102,18 @@ qwen:
 
 zero_shot:
   force_output_digits: true   # 强制模型仅输出 0 或 1 的提示词
-  use_kv_cache_prefix: true   # 对相同问题复用前缀 KV cache
-  question_repeat: true       # 问题相同场景
   test_csv: "data/raw/kaggle-llm-science-exam/test.csv"  # 测试集路径
   val_csv: "data/raw/kaggle-llm-science-exam/sample_submission.csv"  # 验证集路径（可选）
   output: "output/predictions_zeroshot.csv"  # 输出预测路径
   retrieval_batch_size: 8     # 检索批处理大小
-  generation_batch_size: 1    # 生成批处理大小
-  do_sample: false
+  generation_batch_size: 16    # 生成批处理大小
+ 
+qwen_mlp:
+
+
+
+
+
 
 kaggle:
   train_csv: "data/raw/kaggle-llm-science-exam/train.csv"

@@ -1,6 +1,6 @@
 """Zero-Shot Answer Generation Pipeline
 
-从 test.csv 读取问题，使用检索 pipeline 生成 context，然后用 LLM 生成答案
+从离线 context parquet 文件读取 context，然后用 LLM 生成答案
 """
 import sys
 import pandas as pd
@@ -15,9 +15,7 @@ import argparse
 project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root / 'src'))
 
-from retrieval.retrieval_pipeline import RetrievalPipeline
-from modeling.qwen_generator import QwenGenerator
-
+from modeling.qwen_zeroshot_abcde import QwenZeroShot
 
 def load_config(config_path: str = 'config.yaml') -> Dict:
     """加载config.yaml配置
@@ -38,79 +36,55 @@ def load_config(config_path: str = 'config.yaml') -> Dict:
     return config
 
 
-def load_test_data(csv_path: str) -> pd.DataFrame:
-    """加载测试数据
+def load_test_data(parquet_path: str) -> pd.DataFrame:
+    """加载离线context数据
     
     Args:
-        csv_path: test.csv 路径
+        parquet_path: context parquet 路径
     
     Returns:
-        DataFrame with columns: id, prompt, A, B, C, D, E
+        DataFrame with columns: id, prompt, A, B, C, D, E, answer, C1, C2, C3
     """
-    print(f"[数据加载] 读取测试数据: {csv_path}")
-    df = pd.read_csv(csv_path)
-    print(f"[数据加载] 共 {len(df)} 条测试数据")
+    print(f"[数据加载] 读取离线context数据: {parquet_path}")
+    df = pd.read_parquet(parquet_path)
+    print(f"[数据加载] 共 {len(df)} 条数据")
     return df
 
 
-def retrieve_contexts_batch(
-    questions: List[str],
-    retrieval_pipeline: RetrievalPipeline,
-    top_k: int = 5,
-    batch_size: int = 8
+def load_offline_contexts(
+    df: pd.DataFrame,
+    context_columns: List[str] = ['C1', 'C2', 'C3']
 ) -> List[str]:
-    """批量检索生成 contexts
+    """从离线数据加载 contexts
     
     Args:
-        questions: 问题列表
-        retrieval_pipeline: 检索 pipeline
-        top_k: 每个问题返回 top-k 个 chunks
-        batch_size: 批处理大小
+        df: 包含 context 列的 DataFrame
+        context_columns: context 列名列表
     
     Returns:
         context 字符串列表
     """
-    print(f"\n[检索] 开始批量检索 ({len(questions)} queries, batch_size={batch_size})...")
+    print(f"\n[加载] 从离线数据加载 contexts...")
     
-    all_contexts = []
+    contexts = []
+    for idx, row in df.iterrows():
+        context_parts = []
+        for rank, col in enumerate(context_columns, 1):
+            if col in row and pd.notna(row[col]) and str(row[col]).strip():
+                context_parts.append(f"[Document {rank}]\n{row[col]}")
+        
+        context = "\n\n".join(context_parts)
+        contexts.append(context)
     
-    # 分批检索
-    for batch_start in range(0, len(questions), batch_size):
-        batch_end = min(batch_start + batch_size, len(questions))
-        batch_queries = questions[batch_start:batch_end]
-        
-        print(f"  [检索] Batch {batch_start//batch_size + 1}/{(len(questions)-1)//batch_size + 1}...", end='', flush=True)
-        
-        # 批量检索
-        batch_results = retrieval_pipeline.retrieve(batch_queries, verbose=False)
-        
-        # 为每个 query 构建 context
-        for query_idx, results in enumerate(batch_results):
-            # results 是 [(chunk_id, score), ...] 的列表
-            context_chunks = []
-            for rank, (chunk_id, score) in enumerate(results[:top_k], 1):
-                # 获取 chunk 文本
-                try:
-                    chunk_text = retrieval_pipeline.reranker.get_parent_chunk_text(chunk_id)
-                    context_chunks.append(f"[Document {rank}]\n{chunk_text}")
-                except:
-                    continue
-            
-            # 拼接所有 chunks
-            context = "\n\n".join(context_chunks)
-            all_contexts.append(context)
-        
-        print(f" ✅")
-    
-    print(f"[检索] 完成，共生成 {len(all_contexts)} 个 contexts")
-    return all_contexts
+    print(f"[加载] 完成，共加载 {len(contexts)} 个 contexts")
+    return contexts
 
 
 def generate_answers_batch(
     questions: List[str],
     options_list: List[Dict[str, str]],
     contexts: List[str],
-    generator: QwenGenerator,
+    generator: QwenZeroShot,
     batch_size: int = 1
 ) -> List[str]:
     """批量生成答案
@@ -145,9 +119,18 @@ def generate_answers_batch(
     # 解析答案
     print(f"  [生成] 解析答案...")
     answers = []
-    for response in responses:
-        answer = generator.parse_answer(response)
-        answers.append(answer if answer else 'A')  # 默认 'A'
+    invalid_answers = []
+    for idx, response in enumerate(responses):
+        answer = response if response else 'A'
+        # 检查是否为有效答案
+        if answer not in ['A', 'B', 'C', 'D', 'E']:
+            invalid_answers.append((idx, answer))
+        answers.append(answer)
+    
+    if invalid_answers:
+        print(f"  [警告] 发现 {len(invalid_answers)} 个无效答案:")
+        for idx, answer in invalid_answers:
+            print(f"    样本 {idx}: {repr(answer)}")
     
     print(f"[生成] 完成，共生成 {len(answers)} 个答案")
     return answers
@@ -161,38 +144,32 @@ def main():
     zero_shot_cfg = config.get('zero_shot', {})
     
     # 所有参数从config.yaml读取
-    test_csv = zero_shot_cfg.get('test_csv', 'data/raw/kaggle-llm-science-exam/test.csv')
+    context_parquet = zero_shot_cfg.get('context_parquet', 'data/processed/context/val_context.parquet')
     output_path = zero_shot_cfg.get('output', 'output/predictions_zeroshot.csv')
-    retrieval_batch_size = zero_shot_cfg.get('retrieval_batch_size', 8)
     generation_batch_size = zero_shot_cfg.get('generation_batch_size', 1)
-    top_k = zero_shot_cfg.get('top_k', 5)
     
     class Args:
         pass
     args = Args()
-    args.test_csv = test_csv
+    args.context_parquet = context_parquet
     args.output = output_path
-    args.retrieval_batch_size = retrieval_batch_size
     args.generation_batch_size = generation_batch_size
-    args.top_k = top_k
     args.max_samples = None
-    args.no_reranker = False
     
     print("\n" + "="*80)
     print("Zero-Shot Answer Generation Pipeline")
     print("="*80)
     print(f"\nConfiguration:")
-    print(f"  Test CSV: {args.test_csv}")
+    print(f"  Context Parquet: {args.context_parquet}")
     print(f"  Output: {args.output}")
-    print(f"  Retrieval Batch Size: {args.retrieval_batch_size}")
     print(f"  Generation Batch Size: {args.generation_batch_size}")
     print(f"  Max Samples: {args.max_samples or 'All'}")
     
-    # ===== Step 1: 加载测试数据 =====
+    # ===== Step 1: 加载离线数据 =====
     print("\n" + "="*80)
-    print("Step 1: 加载测试数据")
+    print("Step 1: 加载离线数据")
     print("="*80)
-    test_df = load_test_data(args.test_csv)
+    test_df = load_test_data(args.context_parquet)
     
     if args.max_samples:
         test_df = test_df.head(args.max_samples)
@@ -211,53 +188,24 @@ def main():
         }
         options_list.append(options)
     
-    # ===== Step 2: 初始化检索 Pipeline =====
+    # ===== Step 2: 加载离线 Contexts =====
     print("\n" + "="*80)
-    print("Step 2: 初始化检索 Pipeline")
+    print("Step 2: 加载离线 Contexts")
     print("="*80)
+    contexts = load_offline_contexts(test_df)
     
-    reranker = None
-    if not args.no_reranker:
-        try:
-            from rerank.jina_reranker import JinaReranker
-            print("[Reranker] 加载 Jina Reranker...")
-            reranker = JinaReranker()
-            print("[Reranker] ✅")
-        except Exception as e:
-            print(f"[Reranker] ⚠️ 加载失败: {e}")
-            reranker = None
-    
-    print("[Pipeline] 初始化 Retrieval Pipeline...")
-    retrieval_pipeline = RetrievalPipeline(reranker_model=reranker)
-    print("[Pipeline] ✅")
-    
-    # ===== Step 3: 批量检索生成 Contexts =====
+    # ===== Step 3: 加载 LLM 模型 =====
     print("\n" + "="*80)
-    print("Step 3: 批量检索生成 Contexts")
+    print("Step 3: 加载 LLM 模型")
     print("="*80)
-    contexts = retrieve_contexts_batch(
-        questions,
-        retrieval_pipeline,
-        top_k=args.top_k,
-        batch_size=args.retrieval_batch_size
+    generator = QwenZeroShot(
+        model_id=qwen_cfg.get('model_id', "Qwen/Qwen3-8B"),
+        device_map=qwen_cfg.get('device_map', 'auto')
     )
     
-    # ===== Step 4: 加载 LLM 模型 =====
+    # ===== Step 4: 批量生成答案 =====
     print("\n" + "="*80)
-    print("Step 4: 加载 LLM 模型")
-    print("="*80)
-    generator = QwenGenerator(
-        model_id=qwen_cfg.get('model_id', "ISTA-DASLab/Qwen3-8B-Instruct-FPQuant-QAT-MXFP4-TEMP"),
-        device_map=qwen_cfg.get('device_map', 'auto'),
-        max_new_tokens=qwen_cfg.get('max_new_tokens', 1),  # 限制为1token
-        gen_temperature=qwen_cfg.get('gen_temperature', 0.0),
-        do_sample=qwen_cfg.get('do_sample', False),
-        trust_remote_code=qwen_cfg.get('trust_remote_code', True)
-    )
-    
-    # ===== Step 5: 批量生成答案 =====
-    print("\n" + "="*80)
-    print("Step 5: 批量生成答案")
+    print("Step 4: 批量生成答案")
     print("="*80)
     answers = generate_answers_batch(
         questions,
@@ -267,29 +215,40 @@ def main():
         batch_size=args.generation_batch_size
     )
     
-    # ===== Step 6: 保存结果 =====
+    # ===== Step 5: 评估与保存 =====
     print("\n" + "="*80)
-    print("Step 6: 保存结果")
+    print("Step 5: 评估与保存")
     print("="*80)
     
-    output_df = pd.DataFrame({
-        'id': test_df['id'],
-        'prediction': answers
-    })
+    # 计算正确率
+    correct_mask = test_df['answer'] == answers
+    accuracy = correct_mask.sum() / len(test_df)
     
-    output_path = Path(args.output)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_df.to_csv(output_path, index=False)
+    print(f"\n[评估] 正确率: {accuracy*100:.2f}% ({correct_mask.sum()}/{len(test_df)})")
     
-    print(f"[保存] ✅ 结果已保存到: {output_path}")
-    print(f"[保存] 共 {len(output_df)} 条预测结果")
+    # 找出所有错误的样本
+    error_indices = [i for i, is_correct in enumerate(correct_mask) if not is_correct]
+    error_df = test_df.iloc[error_indices].copy()
+    error_df['prediction'] = [answers[i] for i in error_indices]
+    
+    # 保存错误样本到CSV
+    error_output_path = Path('output/zeroshot.csv')
+    error_output_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    # 选择需要的列
+    cols_to_save = ['prompt','A', 'B', 'C', 'D', 'E', 'answer', 'prediction', 'C1', 'C2', 'C3']
+    error_save_df = error_df[[col for col in cols_to_save if col in error_df.columns]]
+    error_save_df.to_csv(error_output_path, index=False)
+    
+    print(f"[保存] ✅ 错误样本已保存到: {error_output_path}")
+    print(f"[保存] 共 {len(error_df)} 条错误结果")
     
     # 显示答案分布
-    answer_counts = output_df['prediction'].value_counts()
+    answer_counts = pd.Series(answers).value_counts()
     print(f"\n[统计] 答案分布:")
     for answer in ['A', 'B', 'C', 'D', 'E']:
         count = answer_counts.get(answer, 0)
-        print(f"  {answer}: {count} ({count/len(output_df)*100:.1f}%)")
+        print(f"  {answer}: {count} ({count/len(answers)*100:.1f}%)")
     
     print("\n" + "="*80)
     print("Pipeline 完成 ✅")

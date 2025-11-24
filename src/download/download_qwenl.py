@@ -5,8 +5,8 @@ os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
 # Load model directly
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
-tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-8B-AWQ")
-model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen3-8B-AWQ")
+tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-8B")
+model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen3-8B")
 messages = [
     {"role": "user", "content": "Who are you?"},
 ]
@@ -20,3 +20,4 @@ inputs = tokenizer.apply_chat_template(
 
 outputs = model.generate(**inputs, max_new_tokens=40)
 print(tokenizer.decode(outputs[0][inputs["input_ids"].shape[-1]:]))
+

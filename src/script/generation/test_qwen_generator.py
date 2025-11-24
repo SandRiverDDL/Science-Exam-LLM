@@ -11,7 +11,7 @@ sys.path.insert(0, str(project_root))
 sys.path.insert(0, str(project_root / 'src'))
 
 from modeling.qwen_generator import QwenGenerator
-
+from modeling.qwen_zeroshot_abcde import QwenZeroShot
 
 def main():
     """测试 Qwen Generator"""
@@ -22,11 +22,12 @@ def main():
     
     # 初始化生成器
     print("\n[1/3] 初始化 Qwen Generator...")
-    generator = QwenGenerator(
-        model_id="ISTA-DASLab/Qwen3-8B-Instruct-FPQuant-QAT-MXFP4-TEMP",
-        max_new_tokens=5,
-        do_sample=False
-    )
+    # generator = QwenGenerator(
+    #     model_id="Qwen/Qwen3-8B",
+    #     max_new_tokens=5,
+    #     do_sample=False
+    # )
+    generator = QwenZeroShot()
     print("[1/3] ✅ 初始化完成")
     
     # 准备测试数据
@@ -67,7 +68,7 @@ While mitochondria are primarily known for energy production, they also play rol
     response = responses[0]
     
     # 解析答案
-    answer = generator.parse_answer(response)
+    # answer = generator.parse_answer(response)
     
     # 显示结果
     print("\n" + "="*80)
@@ -75,7 +76,7 @@ While mitochondria are primarily known for energy production, they also play rol
     print("="*80)
     print(f"\n{response}")
     print("\n" + "="*80)
-    print(f"解析的答案: {answer}")
+    # print(f"解析的答案: {answer}")
     print(f"正确答案应该是: E (Energy production through ATP synthesis)")
     print("="*80 + "\n")
 

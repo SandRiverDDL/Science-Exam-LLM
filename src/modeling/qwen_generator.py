@@ -15,7 +15,7 @@ class QwenGenerator:
     
     def __init__(
         self,
-        model_id: str = "ISTA-DASLab/Qwen3-8B-Instruct-FPQuant-QAT-MXFP4-TEMP",
+        model_id: str = "Qwen/Qwen3-8B",
         device_map: str = "auto",
         max_new_tokens: int = 1,
         gen_temperature: float = 0.0,
@@ -161,9 +161,11 @@ class QwenGenerator:
         """
         all_responses = []
 
-        # allowed tokens = ABCDE
-        allowed_tokens = ["A", "B", "C", "D", "E"]
-        allowed_ids = [self.tokenizer.convert_tokens_to_ids(t) for t in allowed_tokens]
+        allowed_seqs = [self.tokenizer.encode(" A", add_special_tokens=False),
+                self.tokenizer.encode(" B", add_special_tokens=False),
+                self.tokenizer.encode(" C", add_special_tokens=False),
+                self.tokenizer.encode(" D", add_special_tokens=False),
+                self.tokenizer.encode(" E", add_special_tokens=False)]
 
         for batch_start in range(0, len(prompts), batch_size):
             batch_end = min(batch_start + batch_size, len(prompts))
@@ -212,77 +214,6 @@ class QwenGenerator:
 
         return all_responses
     
-    # @torch.no_grad()
-    # def extract_hidden_states(
-    #     self,
-    #     prompts: List[str],
-    #     batch_size: int = 1
-    # ) -> Tuple[np.ndarray, List[str]]:
-    #     """提取隐藏状态（用于 MLP 微调）
-        
-    #     Args:
-    #         prompts: prompt 列表
-    #         batch_size: 批处理大小
-        
-    #     Returns:
-    #         (hidden_states, responses) 元组
-    #         - hidden_states: [num_samples, hidden_dim]
-    #         - responses: 生成的答案列表
-    #     """
-    #     all_hidden_states = []
-    #     all_responses = []
-        
-    #     for batch_start in range(0, len(prompts), batch_size):
-    #         batch_end = min(batch_start + batch_size, len(prompts))
-    #         batch_prompts = prompts[batch_start:batch_end]
-            
-    #         # Tokenize
-    #         inputs = self.tokenizer(
-    #             batch_prompts,
-    #             return_tensors="pt",
-    #             padding=True,
-    #             truncation=True,
-    #             max_length=4096
-    #         ).to(self.model.device)
-            
-    #         # Forward pass – 简化方式：直接在forward中提取隐藏状态
-    #         # 设置output_hidden_states=True 即可
-    #         outputs = self.model(
-    #             **inputs,
-    #             output_hidden_states=True
-    #         )
-            
-    #         # 提取最后一层的隐藏状态
-    #         # outputs.hidden_states[-1] 是最后一层， 形状 [batch, seq_len, hidden_dim]
-    #         # 取最后一个 token 的表示作为每个样本的特征
-    #         batch_hidden = outputs.hidden_states[-1][:, -1, :].cpu().numpy()  # [batch, hidden_dim]
-    #         all_hidden_states.append(batch_hidden)
-            
-    #         # 生成回复：使用generate方法产生新的token
-    #         with torch.inference_mode():
-    #             generation_outputs = self.model.generate(
-    #                 **inputs,
-    #                 max_new_tokens=2,  # 最多 2 个 token
-    #                 temperature=0.0,   # 贪心解码
-    #                 do_sample=False,   # 禁用采样
-    #                 pad_token_id=self.tokenizer.pad_token_id,
-    #                 eos_token_id=self.tokenizer.eos_token_id
-    #             )
-            
-    #         # 解码生成部分
-    #         for i, seq in enumerate(generation_outputs):
-    #             input_length = inputs['input_ids'][i].shape[0]
-    #             generated_tokens = seq[input_length:]
-    #             response = self.tokenizer.decode(generated_tokens, skip_special_tokens=True)
-                
-    #             # 使用 parse_answer 严格提取字母
-    #             answer = self.parse_answer(response)
-    #             all_responses.append(answer)
-        
-    #     # Concatenate all batches
-    #     hidden_states = np.vstack(all_hidden_states)
-        
-    #     return hidden_states, all_responses
     
     @staticmethod
     def parse_answer(response: str) -> Optional[str]:
