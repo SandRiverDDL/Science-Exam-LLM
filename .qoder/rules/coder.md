@@ -1,5 +1,6 @@
 ---
-trigger: manual
+trigger: always_on
+alwaysApply: true
 ---
 Role: Senior Production Engineer. 
 Context: High-leverage, production-safe environment. 

@@ -47,7 +47,7 @@ preprocessing:
 # 父文档索引 (Parent Document) Chunking配置
 chunking:
   child_size: 128    # 子chunk大小（用于精准检索）
-  parent_size: 512   # 父chunk大小（用于LLM上下文）
+  parent_size: 256   # 父chunk大小（用于LLM上下文）
 
 # 检索参数
 retrieval:
@@ -69,7 +69,6 @@ retrieval:
     index_path: "data/processed/bm25_index"  # BM25索引保存路径（parquet格式目录）
     k1: 1.5                # BM25参数k1（调整TF饱和点，值大=更重视TF差异）
     b: 0.75                # BM25参数b（调整长度归一化，0=无长度归一化，1=完全归一化）
-    top_k: 300             # BM25检索的top-k（大库推荐300）
   
   # Paragraph Boosting配置（段落指数增强）
   paragraph_boosting:
@@ -82,15 +81,14 @@ retrieval:
   # MMR重排序配置
   mmr:
     lambda: 0.8             # 相关性权重（0.8表示强调相关性，轻度去重）
-    top_k: 500              # MMR返回数量，用于reranker（推荐400-500）
+    top_k: 20              # MMR返回数量，用于reranker（推荐400-500）
 
   # Reranker（可选，提示式评分；若不稳定可关闭）
   reranker:
     model_id: "jinaai/jina-reranker-v3"
-    batch_size: 8                # 批处理大小（reranker 极小 batch，1-8）
+    batch_size: 4               # 批处理大小（reranker 极小 batch，1-8）
     device: null                 # 自动选择 cuda/cpu（建议在有 GPU 时设为 "cuda"）
-    reranker_input_k: 20        # 传给reranker的候选数量（从dense结果中选取）
-    top_k: 5                     # 最终返回给LLM的数量（推荐3-5）
+    top_k: 3                     # 最终返回给LLM的数量（推荐3-5）
 
 # Qwen3 Zero-shot 分类
 qwen:
@@ -105,6 +103,13 @@ zero_shot:
   force_output_digits: true   # 强制模型仅输出 0 或 1 的提示词
   use_kv_cache_prefix: true   # 对相同问题复用前缀 KV cache
   question_repeat: true       # 问题相同场景
+  test_csv: "data/raw/kaggle-llm-science-exam/test.csv"  # 测试集路径
+  val_csv: "data/raw/kaggle-llm-science-exam/sample_submission.csv"  # 验证集路径（可选）
+  output: "output/predictions_zeroshot.csv"  # 输出预测路径
+  retrieval_batch_size: 8     # 检索批处理大小
+  generation_batch_size: 1    # 生成批处理大小
+  do_sample: false
+
 kaggle:
   train_csv: "data/raw/kaggle-llm-science-exam/train.csv"
   sample_submission_csv: "data/raw/kaggle-llm-science-exam/sample_submission.csv"

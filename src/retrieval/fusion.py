@@ -16,7 +16,7 @@ class RetrievalFusion:
     @staticmethod
     def paragraph_boosting(
         dense_results: List[Tuple[str, float]],
-        bm25_results: List[Tuple[int, float]],
+        bm25_results: List[Tuple],
         chunk_id_to_doc: Dict[str, str],
         alpha: float = 0.03
     ) -> Dict[str, float]:
@@ -26,7 +26,7 @@ class RetrievalFusion:
         
         Args:
             dense_results: 密集检索结果 [(chunk_id, similarity), ...]
-            bm25_results: BM25检索结果 [(chunk_idx, score), ...]
+            bm25_results: BM25检索结果 [(chunk_id, score), ...] 或 [(chunk_idx, score), ...]
             chunk_id_to_doc: chunk_id到doc_id的映射
             alpha: 增强系数（0.02-0.04）
         
@@ -60,7 +60,7 @@ class RetrievalFusion:
     @staticmethod
     def rrf_fusion(
         dense_results: List[Tuple[str, float]],
-        bm25_results: List[Tuple[int, float]],
+        bm25_results: List[Tuple],
         chunk_ids: List[str],
         rrf_k: int = 30
     ) -> List[Tuple[str, float]]:
@@ -70,8 +70,8 @@ class RetrievalFusion:
         
         Args:
             dense_results: 密集检索结果 [(chunk_id, similarity), ...]
-            bm25_results: BM25检索结果 [(chunk_idx, score), ...]
-            chunk_ids: 所有chunk_id列表
+            bm25_results: BM25检索结果 [(chunk_id, score), ...] 或 [(chunk_idx, score), ...]
+            chunk_ids: 所有chunk_id列表 (用于从 chunk_idx 推导 chunk_id)
             rrf_k: RRF参数（越小越敏感排名，推荐30-50）
         
         Returns:
@@ -85,9 +85,18 @@ class RetrievalFusion:
             rrf_scores[chunk_id] = rrf_scores.get(chunk_id, 0) + rrf_score
         
         # 处理BM25结果
-        for rank, (chunk_idx, _) in enumerate(bm25_results, 1):
-            if chunk_idx < len(chunk_ids):
-                chunk_id = chunk_ids[chunk_idx]
+        for rank, (chunk_id_or_idx, _) in enumerate(bm25_results, 1):
+            # 新 BM25 rerank 返回 chunk_id (str)，旧格式返回 chunk_idx (int)
+            # 简单判断：如果是 int，使用 chunk_ids 查表；如果是 str，直接使用
+            if isinstance(chunk_id_or_idx, int):
+                # 旧格式：需要从 chunk_ids 查表推导
+                if chunk_id_or_idx < len(chunk_ids):
+                    chunk_id = chunk_ids[chunk_id_or_idx]
+                    rrf_score = 1.0 / (rrf_k + rank)
+                    rrf_scores[chunk_id] = rrf_scores.get(chunk_id, 0) + rrf_score
+            else:
+                # 新格式：直接使用 chunk_id
+                chunk_id = chunk_id_or_idx
                 rrf_score = 1.0 / (rrf_k + rank)
                 rrf_scores[chunk_id] = rrf_scores.get(chunk_id, 0) + rrf_score
         

@@ -34,14 +34,26 @@ class JinaReranker:
             try:
                 from core.config import Config
                 cfg = Config()
-                config = cfg.get('reranker', {})
-            except:
+                # cfg 对象本身不为 None，但控制地获取 reranker 键，或者执行失败
+                if cfg is not None and hasattr(cfg, 'get'):
+                    try:
+                        # reranker 已经归到 retrieval 下了，所以从 retrieval.reranker 读取
+                        config = cfg.get('retrieval', {}).get('reranker', {})
+                    except:
+                        config = {}
+                else:
+                    config = {}
+            except Exception as e:
+                print(f"[Jina] Warning: Failed to load config from Config class: {e}")
                 config = {}
         
         # 优先使用config中的参数
-        model_id = model_id or config.get('model_id', 'jinaai/jina-reranker-v3')
-        batch_size = config.get('batch_size', batch_size)
-        device = device or config.get('device')
+        if config is None:
+            config = {}
+        
+        model_id = model_id or config.get('model_id', 'jinaai/jina-reranker-v3') if isinstance(config, dict) else 'jinaai/jina-reranker-v3'
+        batch_size = config.get('batch_size', batch_size) if isinstance(config, dict) else batch_size
+        device = device or (config.get('device') if isinstance(config, dict) else None)
         
         # Auto-detect device
         if device is None:

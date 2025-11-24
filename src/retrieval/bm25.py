@@ -386,30 +386,82 @@ class BM25Retriever:
         
         return scores
     
-    def retrieve(
+    def get_score_single(self, query_tokens: List[str], doc_tokens: List[str]) -> float:
+        """快速计算单个文档的BM25分数 (纯内存计算，不查倒排表)
+        
+        Args:
+            query_tokens: 查询分词后的token列表
+            doc_tokens: 文档分词后的token列表
+        
+        Returns:
+            BM25分数
+        """
+        score = 0.0
+        doc_len = len(doc_tokens)
+        
+        # 对短文本(Chunk)的优化写法：直接遍历query_tokens计算频率
+        for q_token in query_tokens:
+            if q_token not in self.idf_table:
+                continue
+            
+            # 计算该token在文档中的频率
+            tf = doc_tokens.count(q_token)
+            
+            if tf > 0:
+                idf = self.idf_table[q_token]
+                
+                # BM25 公式核心
+                numerator = tf * (self.k1 + 1)
+                denominator = tf + self.k1 * (1 - self.b + self.b * doc_len / self.avgdl)
+                
+                score += idf * (numerator / denominator)
+        
+        return score
+    
+    def rerank(
         self,
         query: str,
-        tokenizer,
-        top_k: int = 300
-    ) -> List[Tuple[int, float]]:
-        """检索top-k文档
+        candidates: List[Dict],
+        tokenizer
+    ) -> List[Tuple[str, float]]:
+        """极致快速的BM25重排序 (在线分词模式)
+        
+        是对整个库做 BM25检索，只对Dense的topK做BM25重打分
+        dense_top600 → 再做 BM25 重打分（rerank）
+        这样 BM25 只跑 600 条 chunk，非常快
         
         Args:
             query: 查询文本
-            tokenizer: tokenizer实例
-            top_k: 返回top-k结果
+            candidates: Dense检索结果列表，每个元素是一个 Dict。
+                    格式如 {'chunk_id': 'c1', 'text': '...', 'score': 0.8}
+            tokenizer: 分词器
         
         Returns:
-            [(doc_idx, score), ...] 的列表
+            [('chunk_id', bm25_score), ...] 的列表，已排序
         """
-        # 分词
+        # 1. 分词查询
         query_tokens = tokenizer.tokenize(query)
         
-        # 计算分数
-        scores = self.get_scores(query_tokens)
+        results = []
         
-        # 排序并返回top-k
-        top_indices = np.argsort(scores)[::-1][:top_k]
-        results = [(int(idx), float(scores[idx])) for idx in top_indices if scores[idx] > 0]
+        # 2. 仅遍历这600个候选
+        for doc in candidates:
+            chunk_id = doc.get('chunk_id') or doc.get('id')
+            doc_text = doc.get('text', '')
+            
+            if not doc_text or not chunk_id:
+                # 字段不完整，跳过
+                continue
+            
+            # 现场分词 (极致高效：只需600次分词，不需载入GB管文件)
+            doc_tokens = tokenizer.tokenize(doc_text)
+            
+            # 计算BM25分数
+            bm25_score = self.get_score_single(query_tokens, doc_tokens)
+            
+            results.append((chunk_id, bm25_score))
+        
+        # 3. 排序
+        results = sorted(results, key=lambda x: x[1], reverse=True)
         
         return results

@@ -103,8 +103,8 @@ def main():
     print("\n" + "="*80)
     print(f"Test Queries (Batch Size: {args.batch_size})")
     print("="*80)
-    for i, query in enumerate(test_queries, 1):
-        print(f"  [{i}] {query}")
+    # for i, query in enumerate(test_queries, 1):
+    #     print(f"  [{i}] {query}")
     
     # ===== Test 1: Single query (baseline) =====
     if args.batch_size == 1:
@@ -164,16 +164,16 @@ def main():
                 print(f"\n  Batch Results Summary:")
                 
                 # Show summary for each query in batch
-                for query_idx, (query, results) in enumerate(zip(test_queries, batch_results), 1):
-                    print(f"\n    Query {query_idx}: {query[:50]}...")
-                    print(f"      Results: {len(results)} items")
-                    if len(results) > 0:
-                        top_score = results[0][1]
-                        print(f"      Top Score: {top_score:.4f}")
-                        # Show top 3 for this query
-                        print(f"      Top 3:")
-                        for rank, (chunk_id, score) in enumerate(results[:3], 1):
-                            print(f"        [{rank}] {chunk_id} (score: {score:.4f})")
+                # for query_idx, (query, results) in enumerate(zip(test_queries, batch_results), 1):
+                #     print(f"\n    Query {query_idx}: {query[:50]}...")
+                #     print(f"      Results: {len(results)} items")
+                #     if len(results) > 0:
+                #         top_score = results[0][1]
+                #         print(f"      Top Score: {top_score:.4f}")
+                #         # Show top 3 for this query
+                #         print(f"      Top 3:")
+                #         for rank, (chunk_id, score) in enumerate(results[:3], 1):
+                #             print(f"        [{rank}] {chunk_id} (score: {score:.4f})")
             
             except Exception as e:
                 print(f"\n  ❌ ERROR: {e}")
