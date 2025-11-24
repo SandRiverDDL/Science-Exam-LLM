@@ -52,8 +52,17 @@ chunking:
 # 检索参数
 retrieval:
   # Dense Retrieval配置
+  query_encoder:
+    model_id: "Qwen/Qwen3-Embedding-0.6B"
+    batch_size: 32
+    max_length: 168
+    device: null   # 自动选择 cuda/cpu（建议在有 GPU 时设为 "cuda"）
+    dtype: float16 # 在 CUDA 上用 FP16 提升吞吐；CPU 将回退 FP32
+
+  # Dense ANN 检索
   dense:
-    top_k: 600              # Dense检索的top-k（对128万库推荐600）
+    batch_size: 64
+    top_k: 600             # Dense检索的top-k（对128万库推荐600）
   
   # BM25配置
   bm25:
@@ -75,13 +84,13 @@ retrieval:
     lambda: 0.8             # 相关性权重（0.8表示强调相关性，轻度去重）
     top_k: 500              # MMR返回数量，用于reranker（推荐400-500）
 
-# Reranker（可选，提示式评分；若不稳定可关闭）
-reranker:
-  model_id: "jinaai/jina-reranker-v3"
-  batch_size: 8                # 批处理大小（减小以避免OOM，默认8）
-  device: null                 # 自动选择 cuda/cpu（建议在有 GPU 时设为 "cuda"）
-  reranker_input_k: 20        # 传给reranker的候选数量（从dense结果中选取）
-  top_k: 5                     # 最终返回给LLM的数量（推荐3-5）
+  # Reranker（可选，提示式评分；若不稳定可关闭）
+  reranker:
+    model_id: "jinaai/jina-reranker-v3"
+    batch_size: 8                # 批处理大小（reranker 极小 batch，1-8）
+    device: null                 # 自动选择 cuda/cpu（建议在有 GPU 时设为 "cuda"）
+    reranker_input_k: 20        # 传给reranker的候选数量（从dense结果中选取）
+    top_k: 5                     # 最终返回给LLM的数量（推荐3-5）
 
 # Qwen3 Zero-shot 分类
 qwen:

@@ -1,6 +1,11 @@
 """BM25检索器 (BM25 Retrieval)
 
 持久化BM25索引（parquet格式）。
+- 所有数据都存储为parquet格式
+- 支持高效的部分读取（mmap）
+- idf_table, chunk_len必须全量读入
+- tokenized_chunks, inverted_index按需部分读取
+
 参数从config.yaml读取。
 索引路径也从config.yaml中读取。
 """
@@ -9,11 +14,12 @@ from typing import List, Tuple, Dict, Optional
 from collections import defaultdict, Counter
 import numpy as np
 import pandas as pd
+import pyarrow.parquet as pq
 from tqdm import tqdm
 
 
 class BM25Retriever:
-    """BM25检索器（持久化版本，仅parquet格式）"""
+    """BM25检索器 (parquet格式)"""
     
     def __init__(
         self,
@@ -45,13 +51,18 @@ class BM25Retriever:
         self.b = b if b is not None else config.get('b', 0.75)
         
         # 索引数据
-        self.tokenized_chunks = None  # List[List[str]]
+        self.tokenized_chunks = None  # List[List[str]] 或 parquet 路径
         self.chunk_len = None          # List[int]
         self.avgdl = None              # float
         self.idf_table = None          # Dict[str, float]
         self.vocab = None              # Set[str]
         self.inverted_index = None     # Dict[str, List[int]]
         self.chunk_ids = None          # List[str]
+        
+        # parquet 文件路径（用于部分读取）
+        self.index_dir = None
+        self.tokenized_chunks_path = None
+        self.inverted_index_path = None
         
         # 确定索引路径：优先级1. index_path 2. config中的index_path
         if index_path is None:
@@ -149,13 +160,13 @@ class BM25Retriever:
         self._save_parquet(Path(index_path))
     
     def _save_parquet(self, index_dir: Path):
-        """保存为parquet格式"""
+        """保存为parquet格式（全部存储）"""
         index_dir.mkdir(parents=True, exist_ok=True)
         
         print(f"[BM25] 保存索引（parquet格式）到: {index_dir}")
         
-        # 保存tokenized_chunks
-        print("  保存tokenized_chunks...")
+        # 1. 保存tokenized_chunks（parquet）
+        print("  保存tokenized_chunks.parquet...")
         chunks_data = {
             'chunk_id': self.chunk_ids,
             'tokens': [' '.join(tokens) for tokens in self.tokenized_chunks]
@@ -167,8 +178,8 @@ class BM25Retriever:
             compression='snappy'
         )
         
-        # 保存chunk_len
-        print("  保存chunk_len...")
+        # 2. 保存chunk_len（parquet）
+        print("  保存chunk_len.parquet...")
         chunk_len_data = {
             'chunk_id': self.chunk_ids,
             'chunk_len': self.chunk_len
@@ -180,8 +191,8 @@ class BM25Retriever:
             compression='snappy'
         )
         
-        # 保存idf_table
-        print("  保存idf_table...")
+        # 3. 保存idf_table（parquet）
+        print("  保存idf_table.parquet...")
         idf_data = {
             'token': list(self.idf_table.keys()),
             'idf': list(self.idf_table.values())
@@ -193,8 +204,8 @@ class BM25Retriever:
             compression='snappy'
         )
         
-        # 保存倒排索引
-        print("  保存inverted_index...")
+        # 4. 保存倒排索引（parquet）
+        print("  保存inverted_index.parquet...")
         inverted_data = []
         for token, doc_indices in self.inverted_index.items():
             inverted_data.append({
@@ -208,8 +219,8 @@ class BM25Retriever:
             compression='snappy'
         )
         
-        # 保存元数据
-        print("  保存metadata...")
+        # 5. 保存元数据（parquet）
+        print("  保存metadata.parquet...")
         metadata = {
             'avgdl': [self.avgdl],
             'k1': [self.k1],
@@ -244,43 +255,92 @@ class BM25Retriever:
         
         print(f"[BM25] 加载索引（parquet格式）: {index_dir}")
         
-        # 加载元数据
+        # 保存索引目录（供后续部分读取）
+        self.index_dir = index_dir
+        self.tokenized_chunks_path = index_dir / 'tokenized_chunks.parquet'
+        self.inverted_index_path = index_dir / 'inverted_index.parquet'
+        
+        # 1. 加载metadata（必须全量）
         print("  加载metadata...")
         metadata_df = pd.read_parquet(index_dir / 'metadata.parquet')
         self.avgdl = float(metadata_df.loc[0, 'avgdl'])
         self.k1 = float(metadata_df.loc[0, 'k1'])
         self.b = float(metadata_df.loc[0, 'b'])
         
-        # 加载tokenized_chunks
-        print("  加载tokenized_chunks...")
-        chunks_df = pd.read_parquet(index_dir / 'tokenized_chunks.parquet')
-        self.chunk_ids = chunks_df['chunk_id'].tolist()
-        self.tokenized_chunks = [tokens.split() for tokens in chunks_df['tokens']]
-        
-        # 加载chunk_len
+        # 2. 加载chunk_len（必须全量，BM25公式需要）
         print("  加载chunk_len...")
         chunk_len_df = pd.read_parquet(index_dir / 'chunk_len.parquet')
+        self.chunk_ids = chunk_len_df['chunk_id'].tolist()
         self.chunk_len = chunk_len_df['chunk_len'].tolist()
         
-        # 加载idf_table
+        # 3. 加载idf_table（必须全量，BM25公式需要）
         print("  加载idf_table...")
         idf_df = pd.read_parquet(index_dir / 'idf_table.parquet')
         self.idf_table = dict(zip(idf_df['token'], idf_df['idf']))
         self.vocab = set(self.idf_table.keys())
         
-        # 加载倒排索引
-        print("  加载inverted_index...")
-        inverted_df = pd.read_parquet(index_dir / 'inverted_index.parquet')
+        # 4. 延迟加载tokenized_chunks和inverted_index（按需部分读取）
+        print("  准备tokenized_chunks和inverted_index（延迟加载）...")
+        self.tokenized_chunks = None  # 延迟加载
+        self.inverted_index = None    # 延迟加载
+        
+        print(f"[BM25] 索引加载完成")
+        print(f"  文档数: {len(self.chunk_ids)}")
+        print(f"  词汇表大小: {len(self.vocab)}")
+        print(f"  平均文档长度: {self.avgdl:.2f}")
+    
+    def _load_tokenized_chunks(self):
+        """延迟加载tokenized_chunks（按需）"""
+        if self.tokenized_chunks is not None:
+            return
+        
+        print("  [延迟加载] tokenized_chunks...")
+        chunks_df = pd.read_parquet(self.tokenized_chunks_path)
+        self.tokenized_chunks = [tokens.split() for tokens in chunks_df['tokens']]
+    
+    def _load_inverted_index(self):
+        """延迟加载inverted_index（按需）"""
+        if self.inverted_index is not None:
+            return
+        
+        print("  [延迟加载] inverted_index...")
+        inverted_df = pd.read_parquet(self.inverted_index_path)
         self.inverted_index = defaultdict(list)
         for _, row in inverted_df.iterrows():
             token = row['token']
             doc_indices = [int(idx) for idx in row['doc_indices'].split(',')]
             self.inverted_index[token] = doc_indices
+    
+    def _get_inverted_index_for_token(self, token: str) -> List[int]:
+        """按token查询倒排索引（部分读取，高效）
         
-        print(f"[BM25] 索引加载完成")
-        print(f"  文档数: {len(self.tokenized_chunks)}")
-        print(f"  词汇表大小: {len(self.vocab)}")
-        print(f"  平均文档长度: {self.avgdl:.2f}")
+        Args:
+            token: 查询token
+        
+        Returns:
+            包含该token的chunk索引列表
+        """
+        if self.inverted_index is not None:
+            # 已加载全表
+            return self.inverted_index.get(token, [])
+        
+        # 部分读取：仅查询单个token
+        try:
+            import pyarrow.dataset as ds
+            ds_index = ds.dataset(str(self.inverted_index_path))
+            # 过滤查询：token == 'xxx'
+            table = ds_index.to_table(filter=ds.field("token") == token)
+            
+            if len(table) == 0:
+                return []
+            
+            row = table.to_pandas().iloc[0]
+            doc_indices = [int(idx) for idx in row['doc_indices'].split(',')]
+            return doc_indices
+        except Exception as e:
+            print(f"[警告] 部分读取倒排索引失败: {e}，回退到全加载")
+            self._load_inverted_index()
+            return self.inverted_index.get(token, [])
     
     def get_scores(self, query_tokens: List[str]) -> np.ndarray:
         """计算BM25分数
@@ -291,6 +351,12 @@ class BM25Retriever:
         Returns:
             每个文档的BM25分数数组
         """
+        # 必须加载chunk_len（已在load时加载）
+        # 必须加载idf_table（已在load时加载）
+        
+        # 确保tokenized_chunks已加载
+        self._load_tokenized_chunks()
+        
         num_docs = len(self.tokenized_chunks)
         scores = np.zeros(num_docs)
         
@@ -303,14 +369,16 @@ class BM25Retriever:
             
             idf = self.idf_table[token]
             
-            # 遍历包含该token的文档（使用倒排索引加速）
-            for doc_idx in self.inverted_index[token]:
+            # 使用部分读取获取倒排索引
+            doc_indices = self._get_inverted_index_for_token(token)
+            
+            # 遍历包含该token的文档
+            for doc_idx in doc_indices:
                 # 计算文档中该token的频率
                 doc_tf = self.tokenized_chunks[doc_idx].count(token)
                 doc_len = self.chunk_len[doc_idx]
                 
                 # BM25公式
-                # score = IDF * (TF * (k1 + 1)) / (TF + k1 * (1 - b + b * doc_len / avgdl))
                 numerator = doc_tf * (self.k1 + 1)
                 denominator = doc_tf + self.k1 * (1 - self.b + self.b * doc_len / self.avgdl)
                 
