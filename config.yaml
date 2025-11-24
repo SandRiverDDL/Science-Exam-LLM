@@ -51,6 +51,7 @@ chunking:
 
 # 检索参数
 retrieval:
+  batch_size: 64
   # Dense Retrieval配置
   query_encoder:
     model_id: "Qwen/Qwen3-Embedding-0.6B"

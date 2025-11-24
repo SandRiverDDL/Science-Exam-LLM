@@ -450,42 +450,5 @@ class ParentChunkGenerator:
         # 粗略估算：1 token ≈ 4 字符
         return child_size * 4
 
-
-def demonstrate_usage():
-    """演示用法
-    
-    这个函数展示如何使用ParentChunkGenerator
-    """
-    # 示例：需要实际的tokenizer
-    # from transformers import AutoTokenizer
-    # tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
-    
-    sample_text = """
-    Mitochondria are membrane-bound organelles found in eukaryotic cells. 
-    They are often referred to as the "powerhouses" of the cell because they generate 
-    most of the cell's supply of adenosine triphosphate (ATP). 
-    
-    The structure of mitochondria includes an outer membrane and an inner membrane. 
-    The inner membrane is highly folded into structures called cristae. 
-    This increases the surface area available for chemical reactions.
-    
-    While mitochondria are primarily known for energy production, they also play roles 
-    in other cellular processes. These include signaling, differentiation, and cell death.
-    """
-    
-    # generator = ParentChunkGenerator(tokenizer, parent_size=256)
-    # parent_chunks = generator.generate_parent_chunks(
-    #     doc_id="doc_001",
-    #     text=sample_text.strip(),
-    #     title="Mitochondria Structure and Function"
-    # )
-    
-    # for chunk in parent_chunks:
-    #     print(f"Parent ID: {chunk['parent_id']}")
-    #     print(f"  Chars: {chunk['start_char']}-{chunk['end_char']}")
-    #     print(f"  Tokens: {chunk['token_count']}")
-    #     print(f"  Text: {chunk['text'][:100]}...\n")
-
-
 if __name__ == "__main__":
     print(__doc__)

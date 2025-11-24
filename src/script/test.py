@@ -1,7 +1,3 @@
-from blingfire import text_to_words
-from blingfire_utils import BlingFireUtils
 
-text = "Hello world. This is a test."
-
-sentences = BlingFireUtils.GetSentencesWithOffsets(text)
-print(sentences)
+if __name__ == '__main__':
+    df = pd.read_csv('data/processed/context_question.parquet')
