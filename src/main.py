@@ -8,7 +8,7 @@ from retrieval.embedding_jina_gguf import JinaEmbeddingGGUF
 from retrieval.bm25 import BM25Retrieval
 from retrieval.fusion import rrf_fusion
 from index.faiss_store import FaissIndex
-from rerank.jina_reranker_gguf import JinaRerankerGGUF
+from rerank.jina_reranker import JinaRerankerGGUF
 from model.qwen_zero_shot import QwenZeroShotClassifier
 
 def load_corpus(corpus_dir: str) -> Tuple[List[str], List[List[str]]]:

@@ -5,61 +5,81 @@
 from typing import List, Tuple
 import pandas as pd
 
-
 class CrossEncoderReranker:
-    """交叉编码器重排序器"""
+    """交叉编码器重排序器（高性能优化版）"""
     
     def __init__(self, chunks_parquet: str, docs_parquet: str):
-        """初始化Reranker
-        
-        Args:
-            chunks_parquet: chunks.parquet文件路径
-            docs_parquet: documents_cleaned.parquet文件路径
-        """
+        """初始化Reranker（保持原接口不变）"""
         self.chunks_df = pd.read_parquet(chunks_parquet)
         self.docs_df = pd.read_parquet(docs_parquet)
-        
-        # 建立快速查询索引
-        self.chunk_to_doc = dict(zip(self.chunks_df['chunk_id'], self.chunks_df['doc_id']))
-        self.doc_texts = dict(zip(self.docs_df['doc_id'], self.docs_df['text']))
-    
+
+        # ---- O(1) 加速：构建字典索引 ----
+        self.chunk_rows = {
+            row["chunk_id"]: row
+            for _, row in self.chunks_df.iterrows()
+        }
+        self.doc_texts = dict(zip(self.docs_df["doc_id"], self.docs_df["text"]))
+
+        # ---- 父 chunk 缓存 ----
+        self.parent_cache = {}
+
+    # -------------------------------
+    # 工具：截断文本避免超 token
+    # -------------------------------
+    @staticmethod
+    def truncate(text: str, max_chars: int = 2200) -> str:
+        """
+        为 CrossEncoder 截断文本（模型多为 512 tokens，≈2000 chars）
+        """
+        if len(text) > max_chars:
+            return text[:max_chars]
+        return text
+
+    # -------------------------------
+    # 子chunk文本（基本不用）
+    # -------------------------------
     def get_chunk_text(self, chunk_id: str) -> str:
-        """获取chunk的完整文本"""
-        try:
-            chunk_row = self.chunks_df[self.chunks_df['chunk_id'] == chunk_id].iloc[0]
-            doc_id = chunk_row['doc_id']
-            doc_text = self.doc_texts.get(doc_id, "")
-            
-            # 提取子chunk文本
-            child_start = chunk_row['child_start']
-            child_end = chunk_row['child_end']
-            chunk_text = doc_text[child_start:child_end]
-            
-            return chunk_text
-        except Exception as e:
+        row = self.chunk_rows.get(chunk_id)
+        if row is None:
             return ""
-    
+        
+        doc_text = self.doc_texts.get(row["doc_id"], "")
+        return doc_text[row["child_start"]:row["child_end"]]
+
+    # -------------------------------
+    # 父 chunk 文本（主用于重排）
+    # -------------------------------
     def get_parent_chunk_text(self, chunk_id: str) -> str:
-        """获取chunk的父chunk（512 tokens上下文）"""
-        try:
-            chunk_row = self.chunks_df[self.chunks_df['chunk_id'] == chunk_id].iloc[0]
-            doc_id = chunk_row['doc_id']
-            doc_text = self.doc_texts.get(doc_id, "")
-            title = chunk_row['title']
-            
-            # 提取父chunk文本
-            parent_start = chunk_row['parent_start']
-            parent_end = chunk_row['parent_end']
-            parent_text = doc_text[parent_start:parent_end]
-            
-            # 拼接标题和父chunk
-            if title:
-                return f"{title}\n\n{parent_text}"
-            else:
-                return parent_text
-        except Exception as e:
+        """获取父 chunk（含标题 + 上下文 512 tokens）"""
+        
+        # ---- 缓存命中 ----
+        if chunk_id in self.parent_cache:
+            return self.parent_cache[chunk_id]
+
+        row = self.chunk_rows.get(chunk_id)
+        if row is None:
             return ""
-    
+
+        doc_id = row["doc_id"]
+        doc_text = self.doc_texts.get(doc_id, "")
+
+        parent_text = doc_text[row["parent_start"]:row["parent_end"]]
+        
+        # 标题拼接
+        if row.get("title"):
+            combined = f"{row['title']}\n\n{parent_text}"
+        else:
+            combined = parent_text
+
+        # ---- token 长度控制 ----
+        combined = self.truncate(combined, max_chars=2200)
+
+        self.parent_cache[chunk_id] = combined
+        return combined
+
+    # -------------------------------
+    # Cross-Encoder Rerank
+    # -------------------------------
     def rerank(
         self,
         query: str,
@@ -67,40 +87,41 @@ class CrossEncoderReranker:
         reranker_model,
         top_k: int = 10
     ) -> List[Tuple[str, float]]:
-        """使用Cross-Encoder重排序
-        
-        Args:
-            query: 查询文本
-            chunk_ids: 待重排序的chunk_id列表
-            reranker_model: 已加载的reranker模型
-            top_k: 返回top_k个结果
-        
-        Returns:
-            重排序后的结果 [(chunk_id, score), ...]
         """
-        # 准备文本对
+        使用 Cross-Encoder 进行重排序
+        返回格式 [(chunk_id, score), ...]
+        """
         query_chunk_pairs = []
         valid_chunk_ids = []
-        
-        for chunk_id in chunk_ids:
-            # 获取父chunk作为上下文
-            chunk_text = self.get_parent_chunk_text(chunk_id)
-            
-            if chunk_text:
-                query_chunk_pairs.append([query, chunk_text])
-                valid_chunk_ids.append(chunk_id)
-        
+
+        for cid in chunk_ids:
+            chunk_text = self.get_parent_chunk_text(cid)
+            if not chunk_text:
+                continue
+
+            # 仍保持你的双文本格式
+            query_chunk_pairs.append([query, chunk_text])
+            valid_chunk_ids.append(cid)
+
         if not query_chunk_pairs:
             return []
-        
-        # 使用reranker计算分数
+
+        # ---- 模型计算 ----
         scores = reranker_model.rank(query_chunk_pairs)
-        
-        # 排序并返回top_k
+
+        # 安全性检查
+        if len(scores) != len(valid_chunk_ids):
+            raise RuntimeError(
+                f"Reranker score length mismatch: "
+                f"{len(scores)} vs {len(valid_chunk_ids)}"
+            )
+
+        # ---- 排序 + 截断 ----
         ranked = sorted(
             zip(valid_chunk_ids, scores),
             key=lambda x: x[1],
             reverse=True
         )[:top_k]
-        
+
         return ranked
+

@@ -73,6 +73,11 @@ class DenseRetriever:
             dtype=dtype
         )
     
+    @property
+    def tokenizer(self):
+        """获取tokenizer（供BM25等其他模块使用）"""
+        return self.embedding_model.tokenizer
+    
     def retrieve(self, query: str, top_k: int = 600) -> List[Tuple[str, float]]:
         """检索最相似的chunks
         

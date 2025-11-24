@@ -10,47 +10,30 @@ project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root / 'src'))
 
 from retrieval.retrieval_pipeline import RetrievalPipeline
+from rerank.jina_reranker import JinaReranker
 
 
 def main():
     """Test retrieval pipeline"""
     
     print("\n" + "="*80)
-    print("Retrieval Pipeline Initialization")
+    print("Retrieval Pipeline Test (Using RetrievalPipeline)")
     print("="*80)
     
-    # Initialize reranker model (you need to provide this)
-    print("\n[NOTE] Reranker model required:")
-    print("    Example: from rerank.jina_reranker_gguf import JinaReranker")
-    print("             reranker = JinaReranker(...)")
-    print("\nFor demo, skip reranker. Show first 5 steps only.")
-    
-    # Initialize pipeline (without reranker)
+    # Initialize reranker model
+    print("\n[1/2] Initializing Jina Reranker...", end='', flush=True)
     try:
-        print("\n[1/2] Initializing Dense Retriever...", end='', flush=True)
-        import yaml
-        with open(project_root / 'config.yaml', 'r', encoding='utf-8') as f:
-            config = yaml.safe_load(f)
-        
-        qwen3_config = config.get('embedding', {}).get('qwen3', {})
-        index_path = project_root / qwen3_config.get('index_path', 'data/faiss/qwen3_fp16_ip.faiss')
-        chunk_ids_path = project_root / 'data' / 'faiss' / 'qwen3_fp16_ip_chunk_ids.json'
-        
-        from retrieval.dense_retrieval import DenseRetriever
-        dense_retriever = DenseRetriever(
-            str(index_path),
-            str(chunk_ids_path),
-            model_id=qwen3_config.get('model_id', 'Qwen/Qwen3-Embedding-0.6B'),
-            device=qwen3_config.get('device') or 'cuda',
-            max_length=qwen3_config.get('max_length', 168),
-            dtype=qwen3_config.get('dtype', 'float16')
-        )
+        reranker = JinaReranker()
         print(" OK")
-        
-        print("[2/2] Initializing Data...", end='', flush=True)
-        import pandas as pd
-        chunks_df = pd.read_parquet(project_root / 'data' / 'processed' / 'chunks.parquet')
-        docs_df = pd.read_parquet(project_root / 'data' / 'processed' / 'documents_cleaned.parquet')
+    except Exception as e:
+        print(f"\n  ERROR loading reranker: {e}")
+        print(f"  Continuing without reranker...")
+        reranker = None
+    
+    # Initialize complete pipeline
+    try:
+        print("[2/2] Initializing Retrieval Pipeline...", end='', flush=True)
+        pipeline = RetrievalPipeline(reranker_model=reranker)
         print(" OK")
         
     except Exception as e:
@@ -74,33 +57,25 @@ def main():
         print("-" * 80)
         
         try:
-            # Dense retrieval
-            print(f"  Dense retrieval (top-600)...", end='', flush=True)
-            dense_results = dense_retriever.retrieve(query, top_k=600)
-            print(f" OK, found {len(dense_results)}")
+            # Use complete pipeline
+            print(f"  Running full retrieval pipeline...", end='', flush=True)
+            results = pipeline.retrieve(query, verbose=True)
+            print(f" OK, final {len(results)} results")
             
-            # Show top-5 results
-            print(f"\n  Top-5 Results:")
-            for rank, (chunk_id, similarity) in enumerate(dense_results[:5], 1):
-                # Get chunk text
-                chunk_row = chunks_df[chunks_df['chunk_id'] == chunk_id]
-                if len(chunk_row) > 0:
-                    chunk_row = chunk_row.iloc[0]
-                    doc_id = chunk_row['doc_id']
-                    doc_row = docs_df[docs_df['doc_id'] == doc_id]
-                    
-                    if len(doc_row) > 0:
-                        doc_text = doc_row.iloc[0]['text']
-                        child_start = chunk_row['child_start']
-                        child_end = chunk_row['child_end']
-                        chunk_text = doc_text[child_start:child_end]
-                        
-                        print(f"\n    [Top {rank}] Similarity: {similarity:.4f}")
-                        print(f"    ID: {chunk_id}")
-                        print(f"    Content: {chunk_text[:150]}...")
+            # Display results
+            print(f"\n  Final Results (Top 5):")
+            for rank, (chunk_id, score) in enumerate(results[:5], 1):
+                # Get parent chunk text
+                parent_text = pipeline.reranker.get_parent_chunk_text(chunk_id)
+                
+                print(f"\n    [Top {rank}] Score: {score:.4f}")
+                print(f"    ID: {chunk_id}")
+                print(f"    Content: {parent_text[:150]}...")
         
         except Exception as e:
             print(f"\n  ERROR: {e}")
+            import traceback
+            traceback.print_exc()
     
     print("\n" + "="*80)
     print("Test Complete")
@@ -111,12 +86,11 @@ def main():
     print("  3. [OK] Paragraph Boosting")
     print("  4. [OK] RRF Fusion")
     print("  5. [OK] MMR Reranking")
-    print("  6. [PENDING] Cross-Encoder Reranking")
-    print("\nTo use complete pipeline:")
-    print("  from rerank.jina_reranker_gguf import JinaReranker")
-    print("  reranker_model = JinaReranker(...)")
-    print("  pipeline = RetrievalPipeline(..., reranker_model=reranker_model)")
-    print("  results = pipeline.retrieve(query, verbose=True)\n")
+    if reranker:
+        print("  6. [OK] Cross-Encoder Reranking (Jina-v3)")
+    else:
+        print("  6. [SKIPPED] Cross-Encoder Reranking (model not available)")
+    print("\n")
 
 
 if __name__ == "__main__":

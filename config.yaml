@@ -1,5 +1,5 @@
 # 全局配置
-use_linux: true                # 是否运行在Linux服务器上，启用faiss-gpu和flash-attn
+use_linux: false                # 是否运行在Linux服务器上，启用faiss-gpu和flash-attn
 
 data:
   corpus_dir: "data/raw/articles"            # 文档目录（用于构建索引）
@@ -57,7 +57,10 @@ retrieval:
   
   # BM25配置
   bm25:
-    top_k: 300              # BM25检索的top-k（大库推荐300）
+    index_path: "data/processed/bm25_index"  # BM25索引保存路径（parquet格式目录）
+    k1: 1.5                # BM25参数k1（调整TF饱和点，值大=更重视TF差异）
+    b: 0.75                # BM25参数b（调整长度归一化，0=无长度归一化，1=完全归一化）
+    top_k: 300             # BM25检索的top-k（大库推荐300）
   
   # Paragraph Boosting配置（段落指数增强）
   paragraph_boosting:
@@ -75,7 +78,10 @@ retrieval:
 # Reranker（可选，提示式评分；若不稳定可关闭）
 reranker:
   model_id: "jinaai/jina-reranker-v3"
-  top_k: 10                 # 最终返回给LLM的数量（推荐3-5，10是安全值）
+  batch_size: 8                # 批处理大小（减小以避免OOM，默认8）
+  device: null                 # 自动选择 cuda/cpu（建议在有 GPU 时设为 "cuda"）
+  reranker_input_k: 20        # 传给reranker的候选数量（从dense结果中选取）
+  top_k: 5                     # 最终返回给LLM的数量（推荐3-5）
 
 # Qwen3 Zero-shot 分类
 qwen:

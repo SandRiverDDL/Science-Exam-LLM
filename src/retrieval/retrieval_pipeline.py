@@ -16,16 +16,17 @@ from collections import defaultdict
 
 import numpy as np
 import pandas as pd
-from rank_bm25 import BM25Okapi
 
 try:
     from .dense_retrieval import DenseRetriever
     from .fusion import RetrievalFusion
+    from .bm25 import BM25Retriever
     from ..rerank.reranker import CrossEncoderReranker
 except ImportError:
     # 绝对导入方式（用于直接脚本运行）
     from retrieval.dense_retrieval import DenseRetriever
     from retrieval.fusion import RetrievalFusion
+    from retrieval.bm25 import BM25Retriever
     from rerank.reranker import CrossEncoderReranker
 
 
@@ -39,6 +40,7 @@ class RetrievalPipeline:
         chunk_ids_path: Optional[str] = None,
         chunks_parquet: Optional[str] = None,
         docs_parquet: Optional[str] = None,
+        bm25_index_path: Optional[str] = None,
         reranker_model = None
     ):
         """初始化检索管道
@@ -49,6 +51,7 @@ class RetrievalPipeline:
             chunk_ids_path: chunk_id映射路径
             chunks_parquet: chunks.parquet路径
             docs_parquet: documents_cleaned.parquet路径
+            bm25_index_path: BM25索引路径（如果存在则加载，否则构建）
             reranker_model: 已加载的reranker模型
         """
         # 加载配置
@@ -76,6 +79,9 @@ class RetrievalPipeline:
             dtype=qwen3_config.get('dtype', 'float16')
         )
         
+        # 从DenseRetriever获取tokenizer（避免重复加载）
+        self.bm25_tokenizer = self.dense_retriever.tokenizer
+        
         # 初始化Reranker
         self.reranker = CrossEncoderReranker(
             chunks_parquet or 'data/processed/chunks.parquet',
@@ -99,43 +105,29 @@ class RetrievalPipeline:
         ))
         
         # 初始化BM25
-        self._init_bm25()
+        project_root = Path(__file__).parent.parent.parent
+        bm25_config = self.config.get('retrieval', {}).get('bm25', {})
+        bm25_index_path = bm25_config.get('index_path', str(project_root / 'data' / 'processed' / 'bm25_index'))
+        
+        if Path(bm25_index_path).exists():
+            # 加载已有索引
+            self.bm25 = BM25Retriever(index_path=bm25_index_path, config=bm25_config)
+        else:
+            # 构建新索引
+            print(f"[BM25] 索引不存在，开始构建...")
+            self.bm25 = BM25Retriever(
+                chunks_parquet=chunks_parquet or 'data/processed/chunks.parquet',
+                docs_parquet=docs_parquet or 'data/processed/documents_cleaned.parquet',
+                tokenizer=self.bm25_tokenizer,
+                config=bm25_config
+            )
+            # 保存索引
+            self.bm25.save(bm25_index_path)
     
     def _load_config(self, config_path: str) -> dict:
         """加载配置文件"""
         with open(config_path, 'r', encoding='utf-8') as f:
             return yaml.safe_load(f)
-    
-    def _init_bm25(self):
-        """初始化BM25索引"""
-        try:
-            import jieba
-        except ImportError:
-            print("⚠️  警告: jieba未安装，BM25功能将不可用")
-            self.bm25 = None
-            return
-        
-        # 对chunk文本进行分词
-        chunk_texts = []
-        for chunk_id in self.chunk_ids_list:
-            chunk_row = self.chunks_df[self.chunks_df['chunk_id'] == chunk_id].iloc[0]
-            doc_id = chunk_row['doc_id']
-            doc_row = self.docs_df[self.docs_df['doc_id'] == doc_id]
-            
-            if len(doc_row) > 0:
-                doc_text = doc_row.iloc[0]['text']
-                child_start = chunk_row['child_start']
-                child_end = chunk_row['child_end']
-                chunk_text = doc_text[child_start:child_end]
-                chunk_texts.append(chunk_text)
-            else:
-                chunk_texts.append("")
-        
-        # 分词
-        tokenized_chunks = [list(jieba.cut(text)) for text in chunk_texts]
-        
-        # 创建BM25索引
-        self.bm25 = BM25Okapi(tokenized_chunks)
     
     def retrieve(
         self,
@@ -146,6 +138,7 @@ class RetrievalPipeline:
         rrf_k: Optional[int] = None,
         mmr_lambda: Optional[float] = None,
         mmr_top_k: Optional[int] = None,
+        reranker_input_k: Optional[int] = None,
         reranker_top_k: Optional[int] = None,
         verbose: bool = False
     ) -> List[Tuple[str, float]]:
@@ -174,7 +167,8 @@ class RetrievalPipeline:
         rrf_k = rrf_k or retrieval_config.get('fusion', {}).get('rrf_k', 30)
         mmr_lambda = mmr_lambda or retrieval_config.get('mmr', {}).get('lambda', 0.8)
         mmr_top_k = mmr_top_k or retrieval_config.get('mmr', {}).get('top_k', 500)
-        reranker_top_k = reranker_top_k or self.config.get('reranker', {}).get('top_k', 10)
+        reranker_input_k = reranker_input_k or self.config.get('reranker', {}).get('reranker_input_k', 100)
+        reranker_top_k = reranker_top_k or self.config.get('reranker', {}).get('top_k', 5)
         
         if verbose:
             print("\n" + "="*80)
@@ -194,27 +188,20 @@ class RetrievalPipeline:
         if verbose:
             print(f"\n[2] BM25 Retrieval (top-{bm25_top_k})...", end='', flush=True)
         
-        if self.bm25 is None:
+        try:
+            # 使用BM25Retriever
+            bm25_results = self.bm25.retrieve(
+                query,
+                tokenizer=self.bm25_tokenizer,
+                top_k=bm25_top_k
+            )
+            
+            if verbose:
+                print(f" ✅ 找到{len(bm25_results)}条")
+        except Exception as e:
             bm25_results = []
             if verbose:
-                print(" ⏭️  BM25未可用")
-        else:
-            try:
-                import jieba
-                query_tokens = list(jieba.cut(query))
-                bm25_scores = self.bm25.get_scores(query_tokens)
-                bm25_results = sorted(
-                    enumerate(bm25_scores),
-                    key=lambda x: x[1],
-                    reverse=True
-                )[:bm25_top_k]
-                
-                if verbose:
-                    print(f" ✅ 找到{len(bm25_results)}条")
-            except Exception as e:
-                bm25_results = []
-                if verbose:
-                    print(f" ❌ BM25不可用: {e}")
+                print(f" ❌ BM25不可用: {e}")
         
         # Step 3: Paragraph Boosting (可选)
         if verbose:
@@ -249,21 +236,30 @@ class RetrievalPipeline:
         mmr_results = RetrievalFusion.mmr_reranking(
             fused_results, {}, lambda_param=mmr_lambda, top_k=mmr_top_k
         )
-        
+        # 🚨 必须截断：只给 reranker 输入 20 条
+        mmr_results = mmr_results[:reranker_input_k]
         if verbose:
             print(f" ✅ 去重后{len(mmr_results)}条")
         
         # Step 6: Cross-Encoder Reranking
-        if verbose:
-            print(f"\n[6] Cross-Encoder Reranking (top-{reranker_top_k})...", end='', flush=True)
+        if self.reranker_model is not None:
+            if verbose:
+                print(f"\n[6] Cross-Encoder Reranking (top-{reranker_top_k})...", end='', flush=True)
+            
+            mmr_chunk_ids = [cid for cid, _ in mmr_results]
+            final_results = self.reranker.rerank(
+                query, mmr_chunk_ids, self.reranker_model, top_k=reranker_top_k
+            )
+            
+            if verbose:
+                print(f" ✅ 最终{len(final_results)}条")
+        else:
+            # 没有 reranker，直接返回 MMR 结果
+            if verbose:
+                print(f"\n[6] Cross-Encoder Reranking: ⏭️  跳过（未加载reranker）")
+            final_results = [(cid, score) for cid, score in mmr_results[:reranker_top_k]]
         
-        mmr_chunk_ids = [cid for cid, _ in mmr_results]
-        final_results = self.reranker.rerank(
-            query, mmr_chunk_ids, self.reranker_model, top_k=reranker_top_k
-        )
-        
         if verbose:
-            print(f" ✅ 最终{len(final_results)}条")
             print("="*80 + "\n")
         
         return final_results
